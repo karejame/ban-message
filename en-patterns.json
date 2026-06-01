@@ -1,0 +1,40 @@
+{
+  "_comment": "CyberShield English Toxicity Rules — Layer 1",
+
+  "hard_keywords": [
+    "kill yourself", "kys", "go die", "end yourself",
+    "you should die", "hope you die", "kill ur self",
+    "i will find you", "you're dead", "ur dead",
+    "piece of shit", "piece of crap",
+    "fucking worthless", "fucking useless", "fucking idiot",
+    "stupid bitch", "dumb bitch", "ugly bitch",
+    "piece of garbage", "absolute trash",
+    "n*gger", "f*ggot", "r*tard", "c*nt",
+    "slit your wrists", "rope yourself"
+  ],
+
+  "soft_keywords": [
+    "idiot", "moron", "stupid", "dumb", "loser",
+    "worthless", "pathetic", "disgusting", "gross", "ugly",
+    "shut up", "shut your mouth", "nobody asked",
+    "trash", "garbage", "clown", "joke",
+    "blocked", "reported", "ratio", "L take",
+    "cope", "seethe", "mald", "stay mad",
+    "get a life", "no life", "basement dweller",
+    "bot", "fake account", "troll", "shill",
+    "go back to", "get out of", "not welcome"
+  ],
+
+  "regex_patterns": [
+    "\\byou('re| are) (so )?(stupid|dumb|ugly|pathetic|worthless|disgusting)\\b",
+    "\\b(nobody|no one) (likes|cares about|wants) you\\b",
+    "\\b(kill|hang|delete) (your)?self\\b",
+    "\\bdi(e|ed) (already|please|in a fire)\\b",
+    "\\b(fat|ugly|stupid) (piece of|fucking)\\b",
+    "\\b(i|we) (hate|despise) (you|ur|u)\\b",
+    "\\bgo (f+uck|f[*u]+ck|fu[ck]+) (your|ur)?self\\b",
+    "\\bwhy (are you|r u) (still|even) (here|alive|breathing)\\b",
+    "\\byou('re| are) (not|never) (going|gonna) (make it|succeed|amount to)\\b",
+    "\\b(everyone|everybody) (hates|can't stand) you\\b"
+  ]
+}
