@@ -80,8 +80,9 @@ export class Evidence {
    * @returns {Promise<string>}  base64 PNG data URL
    */
   async captureScreenshot(element) {
-    const html2canvas = await this._loadHtml2Canvas();
-    const canvas = await html2canvas(element, {
+    const h2c = await this._loadHtml2Canvas();
+    if (!h2c) return null;
+    const canvas = await h2c(element, {
       backgroundColor: '#ffffff',
       scale: 2,
       useCORS: true,
@@ -93,13 +94,29 @@ export class Evidence {
   async _loadHtml2Canvas() {
     if (window.html2canvas) return window.html2canvas;
 
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
-      script.onload  = () => resolve(window.html2canvas);
-      script.onerror = reject;
-      document.head.appendChild(script);
-    });
+    const cdnList = [
+      'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+      'https://cdn.bootcdn.net/ajax/libs/html2canvas/1.4.1/html2canvas.min.js',
+      'https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js',
+    ];
+
+    for (const url of cdnList) {
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = url;
+          s.onload = resolve;
+          s.onerror = reject;
+          document.head.appendChild(s);
+        });
+        if (window.html2canvas) return window.html2canvas;
+      } catch {
+        console.warn(`[CyberShield] html2canvas CDN failed: ${url}`);
+      }
+    }
+
+    console.warn('[CyberShield] All html2canvas CDNs failed, screenshot unavailable');
+    return null;
   }
 
   // ── Storage ───────────────────────────────────────────────────────────────────

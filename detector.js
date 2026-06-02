@@ -191,7 +191,7 @@ Respond with ONLY valid JSON:
 }`;
 
     try {
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const data = await this._gmFetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -205,7 +205,6 @@ Respond with ONLY valid JSON:
         }),
       });
 
-      const data = await response.json();
       const raw = data.content?.[0]?.text || '{}';
       const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
 
@@ -220,6 +219,27 @@ Respond with ONLY valid JSON:
       console.warn('[CyberShield] AI layer failed:', err);
       return null;
     }
+  }
+
+  _gmFetch(url, options = {}) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        url,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+        data: options.body,
+        responseType: 'json',
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            resolve(res.response);
+          } else {
+            reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200)}`));
+          }
+        },
+        onerror: reject,
+        ontimeout: () => reject(new Error('Request timed out')),
+      });
+    });
   }
 
   // ── Utilities ────────────────────────────────────────────────────────────────
