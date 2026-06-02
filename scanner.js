@@ -77,6 +77,31 @@ export class Scanner {
 
   _tryProbeSelectors() {
     const probes = ['[class*="reply"]', '[class*="comment"]', '[class*="Reply"]', '[class*="Comment"]', '[class*="item"]', '[class*="content"]'];
+    const fallbackSelectors = [
+      '[data-testid*="comment"]',
+      '[aria-label*="comment"]',
+      '[class*="comment"]',
+      '[class*="reply"]',
+      '[id*="comment"]',
+      '[data-type="comment"]',
+      'article',
+    ].join(', ');
+
+    const fallback = [...document.querySelectorAll(fallbackSelectors)]
+      .filter(el => !el.closest('#cs-panel'))
+      .filter(el => {
+        const text = el.innerText?.trim() || '';
+        return text.length >= 20 && !/^(\s|\n)*$/.test(text);
+      });
+
+    if (fallback.length > 0) {
+      console.log(`[CyberShield] Fallback scanner found ${fallback.length} possible comment elements`);
+      for (const el of fallback) {
+        this._processComment(el);
+      }
+      return;
+    }
+
     for (const probe of probes) {
       const hits = document.querySelectorAll(probe);
       if (hits.length > 0) {
@@ -217,8 +242,13 @@ export class Scanner {
     };
   }
 
-  _checkMentionsUser() {
-    return false;
+  _checkMentionsUser(el) {
+    const me = this.platform.getCurrentUser?.();
+    if (!me) return false;
+
+    const text = this._extractText(el).toLowerCase();
+    const normalizedMe = me.toLowerCase().replace(/^@/, '').trim();
+    return normalizedMe.length > 0 && (text.includes(`@${normalizedMe}`) || text.includes(normalizedMe));
   }
 }
 

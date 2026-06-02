@@ -19,6 +19,14 @@ export const TwitterPlatform = {
     replyContainer:   '[data-testid="reply"]',
   },
 
+  getCurrentUser() {
+    const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"] img');
+    const alt = el?.alt?.trim();
+    if (!alt) return null;
+    const handle = alt.match(/@([a-zA-Z0-9_]+)/);
+    return handle ? handle[1] : alt;
+  },
+
   blockStrategy: domClickBlockStrategy({
     // The "..." more options button on each tweet
     moreButtonSel:   '[data-testid="caret"]',

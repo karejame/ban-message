@@ -12,14 +12,19 @@ export const GenericPlatform = {
   selectors: {
     // Broad selector catching most comment systems
     commentContainer: [
+      '[data-testid*="comment"]',
+      '[aria-label*="comment"]',
       '[class*="comment"]',
       '[class*="Comment"]',
+      '[class*="reply"]',
+      '[class*="Reply"]',
       '[id*="comment"]',
       '[data-type="comment"]',
       'article',
+      'li',
     ].join(', '),
 
-    commentText: 'p, [class*="content"], [class*="body"], [class*="text"]',
+    commentText: 'p, [class*="content"], [class*="body"], [class*="text"], [class*="comment-body"], [class*="comment-content"], [class*="reply-content"], [class*="comment-text"]',
     username:    '[class*="author"], [class*="user"], [class*="name"], [rel="author"]',
     replyContainer: '[class*="reply"], [class*="Reply"]',
   },

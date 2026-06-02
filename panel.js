@@ -218,10 +218,10 @@ export const Panel = {
 
   _runDiagnose() {
     const selectors = [
-      'reply-item', 'comment-item', 'bili-comment',
+      '.reply-item', '.comment-item', '.bili-comment',
       '[class*="reply"]', '[class*="comment"]',
       '[class*="Reply"]', '[class*="Comment"]',
-      '.reply-item', '.comment-item', '.bili-comment',
+      '[data-testid*="comment"]', '[aria-label*="comment"]',
     ];
     console.log('%c[CyberShield Diagnosis]', 'font-size:16px;font-weight:bold;color:#60a5fa');
     console.log('URL:', location.href);
@@ -363,10 +363,16 @@ const PANEL_CSS = `
     position: fixed;
     bottom: 20px;
     right: 20px;
+    width: 260px;
+    min-width: 260px;
     z-index: 2147483647;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
     font-size: 13px;
     user-select: none;
+  }
+
+  #cs-panel.cs-collapsed {
+    width: 260px;
   }
 
   #cs-drag-handle {
@@ -375,6 +381,7 @@ const PANEL_CSS = `
     gap: 6px;
     cursor: grab;
     justify-content: flex-end;
+    width: 100%;
   }
 
   #cs-drag-handle:active { cursor: grabbing; }
