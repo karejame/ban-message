@@ -286,6 +286,72 @@ export const BilibiliPlatform = {
       },
     });
   },
+
+  /**
+   * 取消拉黑用户 — 使用B站 API 取消拉黑。
+   * 调用 /x/relation/modify 但 act=6 (unblock)。
+   * @param {string} username
+   * @param {string} uid - 用户UID（由调用方提供，避免从DOM提取）
+   */
+  unblockStrategy(username, uid) {
+    if (!uid) {
+      GM_notification({
+        title: '🛡️ CyberShield — B站',
+        text: `无法获取用户UID，请手动取消拉黑 @${username}`,
+      });
+      return;
+    }
+
+    // 获取 CSRF token（B站POST请求需要）
+    const biliJct = document.cookie.match(/bili_jct=([^;]+)/)?.[1] || '';
+
+    if (!biliJct) {
+      GM_notification({
+        title: '🛡️ CyberShield — B站',
+        text: `请先登录B站，再使用取消拉黑功能`,
+      });
+      return;
+    }
+
+    // 调用B站取消拉黑 API (act=6)
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: 'https://api.bilibili.com/x/relation/modify',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      data: `fid=${uid}&act=6&re_src=0&csrf=${biliJct}`,
+      onload: (response) => {
+        try {
+          const data = JSON.parse(response.responseText);
+          if (data.code === 0) {
+            console.log(`[CyberShield] Successfully unblocked UID:${uid} (@${username})`);
+            GM_notification({
+              title: '🛡️ CyberShield — B站',
+              text: `已取消拉黑 @${username}`,
+            });
+          } else {
+            console.warn(`[CyberShield] Unblock API error: code=${data.code}, msg=${data.message}`);
+            GM_notification({
+              title: '🛡️ CyberShield — B站',
+              text: `取消拉黑失败(${data.message})，请手动取消拉黑 @${username}`,
+            });
+          }
+        } catch (e) {
+          GM_notification({
+            title: '🛡️ CyberShield — B站',
+            text: `取消拉黑请求异常，请手动取消拉黑 @${username}`,
+          });
+        }
+      },
+      onerror: () => {
+        GM_notification({
+          title: '🛡️ CyberShield — B站',
+          text: `取消拉黑请求失败，请手动取消拉黑 @${username}`,
+        });
+      },
+    });
+  },
 };
 
 /**

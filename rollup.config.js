@@ -5,7 +5,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @name         CyberShield
 // @name:zh-CN   CyberShield 网暴保护盾
 // @namespace    https://github.com/yourname/cyber-shield
-// @version      0.5.0
+// @version      0.6.0
 // @description  Protect yourself from online harassment. Detects, blurs, and logs toxic content.
 // @description:zh-CN 保护你免受网络暴力。自动检测、屏蔽并记录骚扰内容。
 // @author       CyberShield Contributors

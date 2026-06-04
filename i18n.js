@@ -91,6 +91,14 @@ const strings = {
     blockAllHint: '拉黑扫描日志中所有违规用户',
     blockAllDone: '已拉黑 {n} 个用户',
     blockAllEmpty: '日志中无违规用户',
+
+    blockSelected: '拉黑选中',
+    unblockSelected: '取消拉黑',
+    blockedBadge: '已拉黑',
+    selectAll: '全选',
+    blockSelectedDone: '已拉黑 {n} 个用户',
+    unblockSelectedDone: '已取消 {n} 个用户的拉黑',
+    noUserSelected: '未选中任何用户',
   },
   en: {
     panelTitle: 'CyberShield',
@@ -182,6 +190,14 @@ const strings = {
     blockAllHint: 'Block all violating users from scan log',
     blockAllDone: 'Blocked {n} users',
     blockAllEmpty: 'No violating users in log',
+
+    blockSelected: 'Block Selected',
+    unblockSelected: 'Unblock',
+    blockedBadge: 'Blocked',
+    selectAll: 'Select All',
+    blockSelectedDone: 'Blocked {n} users',
+    unblockSelectedDone: 'Unblocked {n} users',
+    noUserSelected: 'No users selected',
   },
 };
 

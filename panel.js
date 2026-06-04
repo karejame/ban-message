@@ -24,9 +24,14 @@ export const Panel = {
       isRunning: true,
     };
     this._scanLog = [];
+    this._blockedSet = new Set(JSON.parse(GM_getValue('cs_blocked', '[]')));
     this._inject();
     this._bind();
     this._listen();
+  },
+
+  _persistBlocked() {
+    GM_setValue('cs_blocked', JSON.stringify([...this._blockedSet]));
   },
 
   // ── 页面切换 ─────────────────────────────────────────────────────────────
@@ -93,11 +98,11 @@ export const Panel = {
     el.querySelector('#cs-tab-1')?.addEventListener('click', (e) => {
       e.stopPropagation();
       this._switchPage(1);
-    });
+    }, { capture: true });
     el.querySelector('#cs-tab-2')?.addEventListener('click', (e) => {
       e.stopPropagation();
       this._switchPage(2);
-    });
+    }, { capture: true });
 
     // ── 语言切换 ────────────────────────────────────────────────────────
     el.querySelector('#cs-lang-btn')?.addEventListener('click', () => this._switchLang());
@@ -173,8 +178,9 @@ export const Panel = {
     // ── 日志页手动扫描按钮 ──────────────────────────────────────────────
     el.querySelector('#cs-log-manual-scan')?.addEventListener('click', () => this._manualScan());
 
-    // ── 一键拉黑全部违规用户 ────────────────────────────────────────────
-    el.querySelector('#cs-block-all-btn')?.addEventListener('click', () => this._blockAll());
+    // ── 拉黑选中 / 取消拉黑 ──────────────────────────────────────────
+    el.querySelector('#cs-block-selected-btn')?.addEventListener('click', () => this._blockSelected());
+    el.querySelector('#cs-unblock-selected-btn')?.addEventListener('click', () => this._unblockSelected());
 
     this._makeDraggable(el);
   },
@@ -206,58 +212,109 @@ export const Panel = {
   },
 
   /**
-   * 一键拉黑扫描日志中所有违规用户。
-   * 从 scanLog 中提取唯一的违规用户名及其 UID，逐个调用 blocker.block()。
-   * ★ 使用存储的 UID 构造合成元素，避免 blockStrategy 无法从 document.body 提取 UID。
+   * 拉黑选中的用户。
+   * 遍历日志列表中勾选的checkbox，逐个调用 blocker.block()。
    */
-  _blockAll() {
+  _blockSelected() {
     if (!this._scannerRef) {
-      console.warn('[CyberShield] No scanner reference for block-all');
+      console.warn('[CyberShield] No scanner reference for block-selected');
       return;
     }
 
-    // 从扫描日志中提取唯一的违规用户及其 UID
-    const toxicUsers = new Map(); // username → uid
-    for (const entry of this._scanLog) {
-      if (entry.verdict === 'toxic' && entry.username && entry.username !== '?' && entry.username !== '(spam)') {
-        if (!toxicUsers.has(entry.username)) {
-          toxicUsers.set(entry.username, entry.uid || null);
-        }
-      }
-    }
-
-    if (toxicUsers.size === 0) {
+    const checks = this._el.querySelectorAll('.cs-log-check:checked');
+    if (checks.length === 0) {
       GM_notification({
         title: '🛡️ CyberShield',
-        text: t('blockAllEmpty'),
+        text: t('noUserSelected'),
       });
       return;
     }
 
     let blocked = 0;
-    for (const [username, uid] of toxicUsers) {
-      // ★ 构造合成元素，包含 UID 信息，供 blockStrategy 提取
+    for (const cb of checks) {
+      const username = cb.dataset.username;
+      const uid = cb.dataset.uid;
+
+      // 构造合成元素，包含 UID 信息
       let sourceEl;
       if (uid) {
         sourceEl = document.createElement('div');
         const fakeLink = document.createElement('a');
         fakeLink.href = `https://space.bilibili.com/${uid}`;
         sourceEl.appendChild(fakeLink);
-        // 同时设置 data-mid 作为备用
         sourceEl.dataset.mid = uid;
       } else {
         sourceEl = document.body;
       }
 
       this._scannerRef.blocker.block(username, sourceEl);
+      this._blockedSet.add(username);
       blocked++;
-      console.log(`[CyberShield] Block-all: @${username} (UID:${uid || 'unknown'})`);
+      console.log(`[CyberShield] Block-selected: @${username} (UID:${uid || 'unknown'})`);
     }
+
+    this._persistBlocked();
 
     GM_notification({
       title: '🛡️ CyberShield',
-      text: t('blockAllDone', { n: blocked }),
+      text: t('blockSelectedDone', { n: blocked }),
     });
+
+    // 重新渲染日志列表以更新状态
+    this._renderScanLog();
+  },
+
+  /**
+   * 取消拉黑选中的用户。
+   * 遍历日志列表中勾选的已拉黑用户的checkbox，逐个调用 blocker.unblock()。
+   */
+  _unblockSelected() {
+    if (!this._scannerRef) {
+      console.warn('[CyberShield] No scanner reference for unblock-selected');
+      return;
+    }
+
+    // 只处理已拉黑用户的勾选
+    const checks = this._el.querySelectorAll('.cs-log-check-blocked:checked');
+    if (checks.length === 0) {
+      GM_notification({
+        title: '🛡️ CyberShield',
+        text: t('noUserSelected'),
+      });
+      return;
+    }
+
+    let unblocked = 0;
+    for (const cb of checks) {
+      const username = cb.dataset.username;
+      const uid = cb.dataset.uid;
+
+      this._scannerRef.blocker.unblock(username, uid);
+      this._blockedSet.delete(username);
+      unblocked++;
+      console.log(`[CyberShield] Unblock-selected: @${username} (UID:${uid || 'unknown'})`);
+    }
+
+    this._persistBlocked();
+
+    GM_notification({
+      title: '🛡️ CyberShield',
+      text: t('unblockSelectedDone', { n: unblocked }),
+    });
+
+    // 重新渲染日志列表以更新状态
+    this._renderScanLog();
+  },
+
+  /**
+   * 全选/取消全选所有toxic用户checkbox
+   */
+  _toggleSelectAll(e) {
+    const selectAllChecked = e.target.checked;
+    const toxicChecks = this._el.querySelectorAll('.cs-log-check');
+    for (const cb of toxicChecks) {
+      cb.checked = selectAllChecked;
+    }
   },
 
   _renderControlButtons() {
@@ -415,22 +472,47 @@ export const Panel = {
       return;
     }
 
-    container.innerHTML = this._scanLog.map(entry => {
-      const colors = { safe: '#22c55e', suspicious: '#f59e0b', toxic: '#ef4444' };
-      const labels = { safe: t('feedSafe'), suspicious: t('feedSuspicious'), toxic: t('feedToxic') };
-      const color = colors[entry.verdict] || '#888';
-      const label = labels[entry.verdict] || entry.verdict;
-      const time = new Date(entry.timestamp).toLocaleTimeString();
+    const colors = { safe: '#22c55e', suspicious: '#f59e0b', toxic: '#ef4444' };
+    const labels = { safe: t('feedSafe'), suspicious: t('feedSuspicious'), toxic: t('feedToxic') };
+    const typeColors = { comment: '#2563eb', reply: '#8b5cf6', message: '#f59e0b' };
+    const typeLabels = { comment: t('typeComment'), reply: t('typeReply'), message: t('typeMessage') };
 
-      // 内容类型标签颜色和文本
-      const typeColors = { comment: '#2563eb', reply: '#8b5cf6', message: '#f59e0b' };
-      const typeLabels = { comment: t('typeComment'), reply: t('typeReply'), message: t('typeMessage') };
-      const typeColor = typeColors[entry.contentType] || '#888';
-      const typeLabel = typeLabels[entry.contentType] || entry.contentType;
+    const hasToxic = this._scanLog.some(e => e.verdict === 'toxic');
 
-      return `
+    container.innerHTML = [
+      // "全选" 行 — 仅在有toxic条目时显示
+      hasToxic
+        ? `<div class="cs-log-select-all">
+            <input type="checkbox" id="cs-select-all-check" class="cs-log-check">
+            <label for="cs-select-all-check">${t('selectAll')}</label>
+          </div>`
+        : '',
+      ...this._scanLog.map(entry => {
+        const color = colors[entry.verdict] || '#888';
+        const label = labels[entry.verdict] || entry.verdict;
+        const time = new Date(entry.timestamp).toLocaleTimeString();
+        const typeColor = typeColors[entry.contentType] || '#888';
+        const typeLabel = typeLabels[entry.contentType] || entry.contentType;
+        const isBlocked = this._blockedSet.has(entry.username);
+
+        // 是否为 toxic（可被选中拉黑）
+        const isToxic = entry.verdict === 'toxic';
+
+        // 构建复选框 / 已拉黑标记
+        let checkHtml = '';
+        if (isToxic) {
+          if (isBlocked) {
+            checkHtml = `<input type="checkbox" class="cs-log-check-blocked" data-uid="${entry.uid || ''}" data-username="${escapeHtml(entry.username)}" checked>
+              <span class="cs-blocked-badge">&#x2713; ${t('blockedBadge')}</span>`;
+          } else {
+            checkHtml = `<input type="checkbox" class="cs-log-check" data-uid="${entry.uid || ''}" data-username="${escapeHtml(entry.username)}">`;
+          }
+        }
+
+        return `
         <div class="cs-log-item">
           <div class="cs-log-header">
+            ${checkHtml}
             <span class="cs-log-user">@${escapeHtml(entry.username)}</span>
             <span class="cs-log-type" style="background:${typeColor}15;color:${typeColor}">${typeLabel}</span>
             <span class="cs-log-verdict" style="background:${color}15;color:${color}">${label}</span>
@@ -440,7 +522,14 @@ export const Panel = {
           ${entry.reason ? `<div class="cs-log-reason">${escapeHtml(entry.reason)}</div>` : ''}
         </div>
       `;
-    }).join('');
+      }),
+    ].join('');
+
+    // 绑定"全选"事件
+    const selectAllCheck = container.querySelector('#cs-select-all-check');
+    if (selectAllCheck) {
+      selectAllCheck.addEventListener('change', (e) => this._toggleSelectAll(e));
+    }
   },
 
   // ── 自定义关键词管理 ──────────────────────────────────────────────────
@@ -871,7 +960,8 @@ function PANEL_HTML(config) {
         </div>
         <div class="cs-control-btns">
           <button id="cs-log-manual-scan" class="cs-btn cs-btn-accent cs-btn-sm">${t('btnScan')}</button>
-          <button id="cs-block-all-btn" class="cs-btn cs-btn-danger cs-btn-sm">${t('blockAll')}</button>
+          <button id="cs-block-selected-btn" class="cs-btn cs-btn-danger cs-btn-sm">${t('blockSelected')}</button>
+          <button id="cs-unblock-selected-btn" class="cs-btn cs-btn-sm">${t('unblockSelected')}</button>
         </div>
         <div class="cs-scan-hint">${t('scanHint')}</div>
         <div id="cs-log-list">
@@ -1509,6 +1599,44 @@ const PANEL_CSS = `
   .cs-log-reason {
     color: var(--cs-text-secondary);
     font-size: 10px;
+  }
+
+  /* ── 日志页：复选框 / 已拉黑标记 / 全选行 ─────────────────────── */
+
+  .cs-log-check, .cs-log-check-blocked {
+    width: 16px; height: 16px;
+    accent-color: var(--cs-accent);
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+
+  .cs-blocked-badge {
+    font-size: 9px; font-weight: 600;
+    background: var(--cs-success);
+    color: #fff;
+    padding: 1px 6px;
+    border-radius: 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .cs-log-select-all {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: var(--cs-bg-body);
+    border: 1px solid var(--cs-border);
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--cs-text-secondary);
+    cursor: pointer;
+  }
+
+  .cs-log-select-all label {
+    cursor: pointer;
+    user-select: none;
   }
 
   /* ── Modal ─────────────────────────────────────────────────────── */

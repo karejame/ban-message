@@ -39,6 +39,25 @@ export class Blocker {
     }
   }
 
+  /**
+   * Unblock a user via platform's unblockStrategy.
+   * @param {string} username
+   * @param {string} uid
+   */
+  unblock(username, uid) {
+    const strategy = this.platform.unblockStrategy;
+    if (!strategy) {
+      console.warn(`[CyberShield] No unblock strategy for ${this.platform.name}`);
+      return;
+    }
+    try {
+      strategy.call(this.platform, username, uid);
+      console.log(`[CyberShield] Unblocked: @${username}`);
+    } catch (err) {
+      console.error(`[CyberShield] Unblock failed for @${username}:`, err);
+    }
+  }
+
   // ── Internal ──────────────────────────────────────────────────────────────────
 
   _executeBlock(username, sourceElement) {
