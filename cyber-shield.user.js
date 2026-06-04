@@ -5,6 +5,7 @@ import { Blocker } from './blocker.js';
 import { Evidence } from './evidence.js';
 import { PlatformRegistry } from './index.js';
 import { Panel } from './panel.js';
+import { on } from './events.js';
 
 (function () {
   'use strict';
@@ -22,6 +23,7 @@ import { Panel } from './panel.js';
       evidenceLog: true,           // save evidence automatically
       whitelist: [],               // usernames to always show
       blocklist: [],               // manually blocked users
+      customKeywords: [],          // user-defined filter keywords [{keyword, aliases, addedAt}]
     },
 
     async load() {
@@ -37,7 +39,7 @@ import { Panel } from './panel.js';
   // ─── Bootstrap ──────────────────────────────────────────────────────────────
 
   const CyberShield = {
-    version: '0.1.0',
+    version: '0.3.0',
     config: null,
     platform: null,
     scanner: null,
@@ -49,14 +51,40 @@ import { Panel } from './panel.js';
 
         console.log(`[CyberShield] Initializing on: ${this.platform.name}`);
 
-        // Inject UI
-        Panel.mount(this.config);
-
         // Start scanning
         this.scanner = new Scanner(this.platform, this.config);
-        this.scanner.start();
 
-        console.log('[CyberShield] Ready! 🛡️');
+        // Inject UI (传入 scanner 引用，面板需要操作 scanner)
+        Panel.mount(this.config, this.scanner);
+
+        await this.scanner.start();
+
+        // ── 监听配置变更事件 ────────────────────────────────────────────────
+        on('config:updated', (data) => {
+          if (data.type === 'customKeywords') {
+            console.log('[CyberShield] Config updated, rebuilding detector...');
+            this.scanner.detector = new Detector(this.config);
+            this.scanner._updateRuleCounts();
+          }
+        });
+
+        // ── 监听面板脚本控制事件 ────────────────────────────────────────────
+        on('scanner:stop', () => {
+          this.scanner.stop();
+          console.log('[CyberShield] Scanner stopped by user');
+        });
+
+        on('scanner:start', () => {
+          this.scanner.start();
+          console.log('[CyberShield] Scanner started by user');
+        });
+
+        on('scanner:manualScan', () => {
+          this.scanner.manualScan();
+          console.log('[CyberShield] Manual scan triggered by user');
+        });
+
+        console.log('[CyberShield] Ready!');
       } catch (err) {
         console.error('[CyberShield] Initialization error:', err);
       }

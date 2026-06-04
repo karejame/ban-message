@@ -2,10 +2,10 @@ import json from '@rollup/plugin-json';
 import resolve from '@rollup/plugin-node-resolve';
 
 const USERSCRIPT_HEADER = `// ==UserScript==
-// @name         CyberShield 🛡️
-// @name:zh-CN   CyberShield 网暴保护盾 🛡️
+// @name         CyberShield
+// @name:zh-CN   CyberShield 网暴保护盾
 // @namespace    https://github.com/yourname/cyber-shield
-// @version      0.1.0
+// @version      0.5.0
 // @description  Protect yourself from online harassment. Detects, blurs, and logs toxic content.
 // @description:zh-CN 保护你免受网络暴力。自动检测、屏蔽并记录骚扰内容。
 // @author       CyberShield Contributors
@@ -17,7 +17,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @match        *://www.youtube.com/*
 // @match        *://weibo.com/*
 // @match        *://www.weibo.com/*
-// @match        *://www.bilibili.com/*
+// @match        *://*.bilibili.com/*
 // @match        *://www.zhihu.com/*
 // @match        *://tieba.baidu.com/*
 //
@@ -27,6 +27,8 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @grant        GM_addStyle
 // @grant        GM_notification
 // @connect      api.anthropic.com
+// @connect      api.bilibili.com
+// @connect      bilibili.com
 //
 // @run-at       document-idle
 // ==/UserScript==

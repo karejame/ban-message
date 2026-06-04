@@ -34,6 +34,7 @@ export class Evidence {
       confidence: entry.result?.confidence,
       reason:     entry.result?.reason,
       layer:      entry.result?.layer,
+      contentType: entry.contentType || 'comment', // 评论/回复/私信
       screenshot: null, // filled in by captureScreenshot()
     });
 

@@ -50,7 +50,9 @@ export class Blocker {
     }
 
     try {
-      strategy(username, sourceElement);
+      // ★ 必须用 .call(this.platform, ...) 保持平台上下文
+      // 否则 blockStrategy 内部的 this 为 undefined，导致 API 调用失败
+      strategy.call(this.platform, username, sourceElement);
       console.log(`[CyberShield] Blocked: @${username}`);
     } catch (err) {
       console.error(`[CyberShield] Block failed for @${username}:`, err);
