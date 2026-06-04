@@ -19,7 +19,8 @@ export const Panel = {
       scanned: 0, filtered: 0, suspicious: 0, spamBlocked: 0,
       lastScanTime: null, activeRules: 0,
       hardRules: 0, softRules: 0, regexRules: 0, customRules: 0,
-      platform: '', observerActive: false, waitingForInit: false, enabled: true,
+      platform: '', observerActive: false, waitingForInit: false,
+      enabled: config.enabled !== false,
       isRunning: true,
     };
     this._scanLog = [];
@@ -279,10 +280,16 @@ export const Panel = {
   },
 
   _updateStatus() {
+    // ★ 同步 enabled 状态到 stats
+    this._stats.enabled = this._config.enabled !== false;
+
+    // 更新拖拽手柄旁的状态点
     const dot = this._el.querySelector('#cs-status-dot');
     if (dot) {
-      dot.className = this._config.enabled ? 'cs-dot cs-dot-on' : 'cs-dot cs-dot-off';
+      dot.className = this._stats.enabled ? 'cs-dot cs-dot-on' : 'cs-dot cs-dot-off';
     }
+
+    // 更新统计面板中的运行状态
     this._renderStats();
   },
 
@@ -301,6 +308,8 @@ export const Panel = {
       on('scan:status', (data) => this._updateScanStatus(data)),
       on('stats:update', (data) => {
         this._stats = { ...this._stats, ...data };
+        // ★ 始终从 config 同步 enabled 状态，防止与 scanner 不一致
+        this._stats.enabled = this._config.enabled !== false;
         this._renderStats();
         this._renderControlButtons();
       }),
@@ -714,7 +723,7 @@ function PANEL_HTML(config) {
     <div id="cs-body">
       <div class="cs-panel-header">
         <span class="cs-panel-title">${t('panelTitle')}</span>
-        <span class="cs-panel-badge">v0.4</span>
+        <span class="cs-panel-badge">v0.5</span>
         <button id="cs-lang-btn" class="cs-lang-btn" title="${t('langSwitchHint')}">${t('langSwitch')}</button>
       </div>
 
