@@ -1,212 +1,349 @@
-## CyberShield 扩展开发文档
+# CyberShield 扩展开发文档 v2.1
 
-本文档基于当前 v0.6.1 的代码实现状态，梳理核心架构的设计意图、已发现的工程漏洞及其解决方案，为后续迭代提供明确的技术方向。
+> 策略调整：先交付可安装、可使用的 MVP，AI 功能作为独立后期模块。
 
 ---
 
 ## 当前实现状态
 
-CyberShield 采用三层检测流水线架构，当前各层实现情况如下。
-
-Layer 1 关键词规则引擎已完成，由 `detector.js` 在启动时将全部关键词编译为单一 RegExp，单次 `text.match()` 完成匹配，实测约 3ms 处理 1000 条内容。规则数据来自本地 JSON 文件（`rules-zh.json`、`rules-en.json`），共 25 条模式，构建时打包进脚本。
-
-Layer 2 行为模式分析已实现基础框架，能够识别重复刷屏、@提及频率异常等行为特征，但尚未接入上下文敏感规则系统。
-
-Layer 3 Claude AI 异步检测已完成接口对接（`ai.js`），支持通过 `GM_xmlhttpRequest` 调用 Claude API，具备基础的 toxic/suspicious/safe 三分类能力。但缺少批处理机制、每日调用上限控制和规则学习回路。
-
-平台适配层已覆盖 Twitter/X、Reddit、YouTube、微博、B站、知乎、贴吧及 Generic fallback 共 8+1 个平台。其中 B站实现了完整的 API 拉黑/取消拉黑（`/x/relation/modify`），其余平台多为通知提示用户手动操作。
-
-扫描引擎（`scanner.js`）通过 MutationObserver 实现实时 DOM 监听，支持 Shadow DOM 递归遍历，兼容 B站新版 Web Component 评论结构。控制面板（`panel.js`）提供双页 UI，支持中英文切换、手动扫描、勾选拉黑/取消拉黑、自定义关键词管理。
+| 模块 | 文件 | 状态 | 备注 |
+|------|------|------|------|
+| 三层检测引擎 | `detector.js` | ✅ | Layer1/2 可用，Layer3 暂冻结 |
+| DOM 扫描器 | `scanner.js` | ✅ | MutationObserver + Shadow DOM |
+| 封锁执行器 | `blocker.js` | ✅ | 三级降级框架已建 |
+| 取证系统 | `evidence.js` | ✅ | 截图 + JSON 导出 |
+| 控制面板 | `panel.js` | ✅ | 中英双语，双页 UI |
+| 平台适配 | `platforms/` | ⚠️ | B站完整，其余仅通知 |
+| 构建系统 | — | ❌ | 尚无 rollup，无法打包 |
+| 远程词库 | — | ❌ | 词库仍打包在脚本内 |
+| AI 功能 | `ai.js` | 🔒 | 接口已通，MVP 阶段冻结 |
 
 ---
 
-## 核心设计漏洞与演进方案
+## MVP 范围定义
 
-### 漏洞 1：词库与脚本耦合
+**MVP = 不依赖 AI、能安装、能检测、能屏蔽、能记录。**
 
-当前所有关键词规则在构建时打包进 `dist/cyber-shield.user.js`。这意味着更新词库必须重新安装脚本，词库膨胀直接导致文件体积增长，社区贡献规则需要修改源码并提交 PR。
+用户安装后应能得到：
+- Layer 1 关键词检测 + Layer 2 行为信号检测
+- 毒性内容自动模糊，可点击展开
+- 至少 3 个平台真正能自动拉黑（B站已完成，再补 2 个）
+- 取证面板可查看、可导出
+- 词库可远程更新，无需重装脚本
 
-演进方案借鉴 uBlock Origin 的分发模式。安装时内置约 200 个种子词保证离线可用；首次运行时从 GitHub raw 地址拉取完整词库并存入 `GM_setValue`；之后每 24 小时后台静默更新一次；用户自定义规则存本地独立命名空间，永不覆盖。
+AI 功能（谐音识别、规则学习、批处理队列）**全部推迟到 MVP 稳定后**。
 
-```
-数据流：
-  内置种子词 → 立即可用
-  远程词库   → fetch → GM_setValue('cs_rules_remote') → 合并到 RegExp
-  用户规则   → GM_setValue('cs_rules_user') → 最高优先级
-  社区 PR    → 更新远程词库 JSON → 用户自动同步
-```
+---
 
-实现要点：`detector.js` 的 `compileRegex()` 方法需要接受三个来源的词库并合并。远程拉取使用 `GM_xmlhttpRequest` 获取 GitHub raw 内容，失败时静默降级到本地词库。更新频率通过 `GM_getValue('cs_rules_last_update')` 时间戳控制。
+## MVP 分阶段计划
 
-### 漏洞 2：关键词匹配的性能隐患
+### Phase 0 — 构建系统（先决条件）
 
-虽然 RegExp 编译已实现，但当远程词库扩展到数万条时，单一正则的构建时间和匹配性能可能出现退化。当前 25 条规则下约 3ms 的基准不可作为长期参考。
+没有构建系统，所有代码都跑不起来。这是第一个必须完成的事。
 
-分阶段优化策略如下。词库规模在 1 万条以内维持当前单一 RegExp 方案，V8 引擎对交替正则的优化足够高效。1 万到 10 万条时，按首字母或类别拆分为多个子 RegExp，并行匹配后合并结果。10 万条以上引入 Aho-Corasick 多模式匹配算法，以 O(n) 复杂度一次扫描完成所有匹配，但实现复杂度显著上升，仅在词库规模确实到达此量级时再引入。
+**任务清单：**
 
-```
-当前基准：
-  25 规则 × 1000 条内容 ≈ 3ms
-  预估上限（单一 RegExp）：约 5000 规则仍可保持 < 10ms
+```bash
+npm init -y
+npm install --save-dev rollup @rollup/plugin-json @rollup/plugin-node-resolve
 ```
 
-### 漏洞 3：AI 实时判断的成本失控
+创建 `rollup.config.js`：
+```js
+import json    from '@rollup/plugin-json';
+import resolve from '@rollup/plugin-node-resolve';
+import fs      from 'fs';
 
-当前每次 Layer 3 触发都会发送一条 API 请求。在高流量场景（如直播间弹幕、热门评论区）下，token 消耗会快速累积。
+const header = fs.readFileSync('./src/header.js', 'utf8'); // Tampermonkey 注释头
 
-核心思路转变：AI 的职责不是当裁判，而是训练规则库。判过一次的内容应沉淀为本地规则，后续由 Layer 1 零成本拦截。
-
-具体机制包括四个层面。规则晋升：AI 判定为 toxic 后，提取触发模式（关键词、句式结构、上下文特征），写入本地缓存规则，下次同类内容由 Layer 1 直接命中。批处理：攒够 10 条灰色内容后打包为一次请求，利用 Claude 的长上下文窗口同时分析多条，单次请求成本降低约 80%。每日上限：默认 30 次 API 调用/天，通过 `GM_getValue('cs_ai_daily_count')` 计数，达到上限后自动降级为仅 Layer 1 + Layer 2。三档模式：关闭（纯规则引擎）、省钱模式（仅 Layer 1 miss 且 Layer 2 不确定时触发 AI）、完整模式（Layer 1 miss 全部送 AI）。
-
-```
-规则晋升示例：
-  AI 判定 "你这个筹集，滚" → toxic
-  提取模式：{ trigger: "筹集", context: ["滚", "你"], sentiment: negative }
-  写入本地：context_sensitive_rules.push(...)
-  下次 "筹集善款" → Layer 2 检查上下文 → 无负面信号 → SAFE（不误杀）
-  下次 "你这个筹集" → Layer 2 检查上下文 → 负面信号命中 → TOXIC（Layer 1 直接拦）
-```
-
-### 漏洞 4：谐音与变体绕过规则库
-
-中文网络暴力中最常见的绕过手法包括：谐音字替换（臭鸡→筹集，傻逼→沙比/煞笔）、拼音缩写（sb、nmsl、zz、cnm）、数字谐音（250、38）、故意错别字（死→四，妈→马）、词义污化（普通词被赋予贬义含义）。
-
-传统词库只能匹配字面，无法理解意图。这正是 AI 不可替代的场景——AI 判断的是语义意图而非字面匹配。
-
-Prompt 工程需要在系统提示中明确列出上述五类绕过手法，要求模型在判断时主动识别。同时 Prompt 应包含正负例对照，防止模型过度敏感。例如「筹集善款」应为 SAFE，「你这个筹集」应为 TOXIC。
-
-实现层面，`ai.js` 的 Prompt 模板需要包含以下指令段落：
-
-```
-你正在检测中文网络暴力内容。特别注意以下绕过手法：
-1. 谐音字替换（如用"筹集"代替"臭鸡"）
-2. 拼音缩写（如 sb、nmsl）
-3. 数字谐音
-4. 故意错别字
-5. 词义污化
-
-判断标准是说话者的意图，而非字面用词。
-同一词汇在不同语境下可能有完全不同的判定。
+export default {
+  input:  'src/cyber-shield.user.js',
+  output: {
+    file:   'dist/cyber-shield.user.js',
+    format: 'iife',
+    banner: header,
+  },
+  plugins: [json(), resolve()],
+};
 ```
 
-### 漏洞 5：上下文敏感规则缺失
-
-当前系统只有硬规则（关键词命中即判定）和软规则（加权评分），缺少上下文敏感规则。这导致一个两难困境：要么词库过于严格（误杀正常内容），要么过于宽松（漏检变体攻击）。
-
-上下文敏感规则的数据结构如下：
-
+`package.json` 加入脚本：
 ```json
-{
-  "context_sensitive": [
-    {
-      "trigger": "筹集",
-      "canonical": "臭鸡",
-      "require_negative_context": true,
-      "negative_signals": ["滚", "去死", "你个", "废物"],
-      "confidence": 0.82,
-      "source": "ai_learned",
-      "created_at": "2026-06-01"
-    }
-  ]
+"scripts": {
+  "build": "rollup -c",
+  "dev":   "rollup -c --watch"
 }
 ```
 
-Layer 2 在遇到触发词时，检查周边文本是否包含负面信号。如果命中至少一个负面信号，判定为 suspicious 并送 Layer 3 二次确认；如果无负面信号，判定为 safe，不误杀正常内容。
+完成主入口 wire-up（`src/cyber-shield.user.js` 真正 import 所有模块）：
+```js
+import { RuleManager } from './core/rule-manager.js';
+import { Detector }    from './core/detector.js';
+import { Scanner }     from './core/scanner.js';
+import { Panel }       from './ui/panel.js';
+import { PlatformRegistry } from './platforms/index.js';
 
-这类规则不应由人工维护，而应由 AI 学习回路自动生成（见漏洞 3 的规则晋升机制）。每条规则附带置信度分数，多次验证后置信度上升，误判后自动降级或删除。
+async function init() {
+  const config   = await Config.load();
+  const rules    = await RuleManager.init();       // 加载词库
+  const detector = new Detector(rules, config);
+  const platform = PlatformRegistry.detect();
+  Panel.mount(config);
+  new Scanner(platform, detector, config).start();
+}
 
-### 漏洞 6：平台适配深度不均
+window.addEventListener('load', init);
+```
 
-当前 8 个平台适配器中，只有 B站实现了完整的 API 拉黑/取消拉黑。Twitter 使用 DOM 模拟点击（依赖页面结构不变），Reddit/YouTube/微博/知乎/贴吧仅弹出通知要求用户手动操作。
-
-后续应逐步加深各平台的适配深度。优先级排序依据用户量分布和 API 开放程度。Twitter/X 应迁移到 API 方式（`/1.1/blocks/create.json`），但需要 OAuth 认证流程。YouTube 可通过 `youtubei/v1` 内部 API 实现隐藏用户。微博有 `/friendships/create` 系列 API 可用。Reddit 的 `POST /api/block_user` 接口相对简单。
-
-每个适配器的 `blockStrategy` 应实现三级降级：优先 API 调用 → 回退 DOM 模拟 → 最终通知用户手动操作。
+**完成标准：** `npm run build` 成功，安装后控制台打印平台名，面板可打开。
 
 ---
 
-## 待实现模块
+### Phase 1 — 检测流水线跑通
 
-### rule-learner.js（规则学习器）
+**任务清单：**
 
-这是当前架构中缺失的最关键模块。职责是接收 AI 判断结果，提取可复用的模式，写入本地规则库。
-
-核心接口：
-
-```javascript
-export const RuleLearner = {
-  // 接收 AI 判断结果，提取模式并写入本地规则
-  learn(aiResult, originalText, context) {},
-
-  // 从本地缓存中加载已学习的规则
-  loadLearnedRules() {},
-
-  // 清理低置信度或过期的规则
-  pruneRules() {},
-
-  // 将规则变更同步到 detector 的 RegExp
-  syncToDetector(detector) {},
-};
+**1. MutationObserver 节流（必须，否则直播弹幕会卡死页面）**
+```js
+let rafPending = false;
+observer = new MutationObserver(() => {
+  if (rafPending) return;
+  rafPending = true;
+  requestIdleCallback(() => {
+    _flushPendingNodes();
+    rafPending = false;
+  }, { timeout: 500 });
+});
 ```
 
-模式提取策略：从 AI 返回的 reason 字段中抽取关键短语；分析触发词的上下文窗口（前后各 5 个 token）；提取句式结构模板（如「你个 [X]」「[X] 去死」）。
+**2. 验证 Layer 1 中英文关键词匹配**
+- 测试用例：硬关键词（应命中）、谐音词（应漏过，MVP 阶段预期行为）、正常词（不应误杀）
 
-### 远程词库管理器
+**3. 验证 Layer 2 行为信号**
+- 全大写超过 60% + 长度 > 10 → suspicious
+- 3 个以上感叹号/问号 → suspicious
+- 2 个以上攻击性 emoji 组合 → suspicious
 
-独立模块，负责词库的版本控制、增量更新和合并逻辑。
+**4. 模糊遮罩 UI**
+- toxic → 模糊 + 遮罩 + 「显示内容」按钮
+- suspicious → 仅加橙色虚线边框，不模糊
+- 「显示内容」点击后该条内容加入本次会话白名单，不再触发
 
-```javascript
+**5. 接通 mentionsUser 检测**
+
+每个平台适配器补充 `getCurrentUser()` 方法：
+```js
+// twitter.js
+getCurrentUser() {
+  const el = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"] img');
+  return el?.getAttribute('alt') || null;
+},
+```
+scanner.js 的 `_checkMentionsUser()` 改为真正调用此方法。
+
+**完成标准：** 在 Twitter 和 B站手动输入一条含硬关键词的评论，5 秒内被模糊，面板取证列表有记录。
+
+---
+
+### Phase 2 — 词库独立
+
+词库打包进脚本是个长期隐患，Phase 2 彻底解决。
+
+**新增模块 `src/core/rule-manager.js`：**
+
+```js
+// 三个词库来源，优先级从高到低
+const SOURCES = {
+  user:   'cs_rules_user',    // GM_setValue key
+  remote: 'cs_rules_remote',  // GM_setValue key
+  seed:   SEED_RULES,         // 内置，构建时打包，约 200 条
+};
+
+// 远程地址，双 URL 降级（GitHub raw → jsDelivr CDN）
+const REMOTE_URLS = {
+  zh: [
+    'https://raw.githubusercontent.com/YOUR/cyber-shield/main/rules/zh-patterns.json',
+    'https://cdn.jsdelivr.net/gh/YOUR/cyber-shield@main/rules/zh-patterns.json',
+  ],
+  en: [
+    'https://raw.githubusercontent.com/YOUR/cyber-shield/main/rules/en-patterns.json',
+    'https://cdn.jsdelivr.net/gh/YOUR/cyber-shield@main/rules/en-patterns.json',
+  ],
+};
+
 export const RuleManager = {
-  REMOTE_URL: 'https://raw.githubusercontent.com/.../rules-zh.json',
-  UPDATE_INTERVAL: 24 * 60 * 60 * 1000, // 24h
+  async init() {
+    await this._updateIfStale();   // 距上次更新 > 24h 才拉取
+    return this.getMerged();
+  },
 
-  async init() {},           // 首次运行拉取，后续检查更新
-  async fetchRemote() {},    // GM_xmlhttpRequest 获取远程词库
-  mergeRules() {},           // 合并内置 + 远程 + 用户规则
-  getCompiledRegex() {},     // 返回合并后的 RegExp
-  getUserRules() {},         // 读取用户自定义规则
-  addUserRule(keyword) {},   // 添加用户规则
+  getMerged() {
+    // 合并顺序：seed → remote → user（后者覆盖前者）
+    // 返回供 Detector 使用的规则对象
+  },
+
+  async _updateIfStale() {
+    const last = GM_getValue('cs_rules_updated_at', 0);
+    if (Date.now() - last < 24 * 3600 * 1000) return;
+    await this._fetchRemote();
+  },
+
+  async _fetchRemote() {
+    // 遍历 REMOTE_URLS，第一个成功就停止
+    for (const url of REMOTE_URLS.zh) {
+      try {
+        const data = await gmFetch(url);  // GM_xmlhttpRequest Promise 封装
+        GM_setValue('cs_rules_remote', JSON.stringify(data));
+        GM_setValue('cs_rules_updated_at', Date.now());
+        return;
+      } catch { continue; }
+    }
+    // 全部失败：静默降级，继续用上次缓存
+  },
+
+  addUserRule(keyword) { /* 写入 cs_rules_user，重新编译 */ },
+  removeUserRule(keyword) { /* 同上 */ },
 };
 ```
 
-### 批处理队列
+**Detector 改造：** `compileRegex()` 接受合并后的规则对象，不再直接 import JSON 文件。
 
-嵌入 `ai.js` 的批处理机制，避免逐条发送请求。
+**完成标准：** 修改 GitHub 上的 `zh-patterns.json` 增加一条新词，24 小时内（或手动触发更新后）本地词库包含该词。
 
-```javascript
-// 攒够 N 条或等待 T 秒后触发一次批量请求
-const BATCH_SIZE = 10;
-const BATCH_TIMEOUT = 5000; // 5s
+---
 
-aiQueue.push(text, context) → Promise<result>
+### Phase 3 — 平台拉黑完善
+
+目标：从「通知用户手动操作」升级为「真正自动拉黑」。
+
+**优先级（按可行性排序）：**
+
+| 平台 | 方案 | 关键点 |
+|------|------|--------|
+| B站 | ✅ 已完成 | 维持 `/x/relation/modify` |
+| Reddit | `POST /api/block_user` | 从页面提取 `modhash` token |
+| 微博 | `/friendships/blocks/create` | 从 cookie 提取 `SUB` token |
+| Twitter/X | DOM 模拟（暂时） | API 需 OAuth，复杂度高，推后 |
+| 知乎/贴吧 | DOM 模拟 | API 不开放，DOM 是唯一选项 |
+
+**auth token 提取原则：** 不存储 token，每次使用前从当前页面实时读取（cookie 或页面内嵌 JSON）。token 仅用于拉黑操作，不用于其他用途。
+
+**每个 blockStrategy 的结构：**
+```js
+async blockStrategy(username, sourceElement) {
+  // 尝试 1：API
+  const token = extractToken();
+  if (token) {
+    const ok = await apiBlock(username, token);
+    if (ok) return;
+  }
+  // 尝试 2：DOM 模拟
+  const done = domBlock(sourceElement);
+  if (done) return;
+  // 尝试 3：通知用户
+  GM_notification({ title: '🛡️ CyberShield', text: `请手动拉黑 @${username}` });
+},
+```
+
+**完成标准：** Reddit 和微博实现 API 自动拉黑，成功率 > 90%（网络正常情况下）。
+
+---
+
+### Phase 4 — MVP 收尾
+
+**取证功能完整化：**
+- `_handleToxic()` 接入截图（当前 captureScreenshot 已写好但未调用）
+- 截图异步执行，失败时静默跳过（不影响主流程）
+
+```js
+_handleToxic(el, text, username, result) {
+  this._blurElement(el, result);
+  this.evidence.log({ text, username, result, url: location.href, timestamp: Date.now() });
+  // 截图异步，不阻塞
+  this.evidence.captureScreenshot(el)
+    .then(dataUrl => this.evidence.attachScreenshot(dataUrl))
+    .catch(() => {}); // 静默失败
+  if (this.config.autoBlock && username) {
+    this.blocker.block(username, el);
+  }
+},
+```
+
+**面板 About 页补充隐私声明：**
+```
+所有数据（取证日志、用户规则）仅存储在本地浏览器，不上传任何服务器。
+```
+
+**完成标准（MVP 整体）：**
+- [ ] `npm run build` 成功
+- [ ] Twitter、B站、Reddit、微博 四平台验证可用
+- [ ] 模糊/展开/取证/拉黑 功能全部端到端跑通
+- [ ] 词库远程更新正常
+- [ ] 不依赖任何外部 AI 服务独立运行
+
+---
+
+## 暂冻结的 AI 功能（MVP 稳定后再做）
+
+以下内容从当前文档移除，等 MVP 发布后单独立项：
+
+- `rule-learner.js` — AI 判断结果沉淀为本地规则
+- `ai.js` 批处理队列 — 攒够 N 条再发送
+- 每日 token 用量上限控制
+- 三档 AI 模式（关闭/省钱/完整）
+- 谐音/变体专用 Prompt 工程
+- 上下文敏感规则自动生成
+
+---
+
+## 模块依赖关系（MVP 版）
+
+```
+cyber-shield.user.js
+  ├── rule-manager.js   ← 种子词 + 远程词库 + 用户规则 → 合并
+  │     └── detector.js ← 消费合并规则，编译 RegExp，执行 L1/L2
+  ├── scanner.js        ← 驱动检测，调用 detector
+  │     ├── blocker.js  ← 三级降级拉黑
+  │     └── evidence.js ← 截图 + 日志
+  └── panel.js          ← 读写 config，展示 evidence
+```
+
+```
+数据流（MVP）：
+  新评论 → scanner 提取文本
+         → detector L1 关键词匹配（~3ms）
+         → [miss] detector L2 行为信号
+         → [toxic]  → blur DOM + evidence.log + blocker.block
+         → [suspicious] → 加警告边框 + evidence.log
+         → [safe]   → 跳过
 ```
 
 ---
 
 ## 性能预算
 
-整个检测流水线必须在浏览器主线程的空闲时间内完成，不能造成可感知的卡顿。各层的性能预算如下。
-
-Layer 1 关键词匹配：目标 < 5ms / 1000 条内容。当前已达标（约 3ms），远程词库扩展到 5000 条后需重新测量。
-
-Layer 2 行为分析：目标 < 2ms / 单条内容。当前实现足够轻量，引入上下文敏感规则后需关注负面信号的匹配开销。
-
-Layer 3 AI 调用：异步执行，不阻塞主线程。关注点在于请求频率控制和响应结果的规则提取延迟。
-
-DOM 操作（模糊/取消模糊）：单元素 < 1ms。当前 `_blurContent()` 使用 CSS filter + overlay 方案，性能开销可忽略。MutationObserver 回调需要节流，避免在大量 DOM 变更时形成回调风暴。
+| 操作 | 目标 | 备注 |
+|------|------|------|
+| Layer 1 匹配 | < 5ms / 1000条 | 单一 RegExp，当前 ~3ms |
+| Layer 2 分析 | < 2ms / 单条 | 纯计算，无 IO |
+| DOM 模糊操作 | < 1ms / 元素 | CSS filter，可忽略 |
+| MutationObserver | 不阻塞主线程 | 必须用 requestIdleCallback 节流 |
+| 远程词库拉取 | 后台异步 | 不影响页面加载，失败静默降级 |
 
 ---
 
 ## 工程原则
 
-**快路径优先。** 绝大多数内容是安全的，三层流水线的设计确保 Layer 1 能拦截 90% 以上的违规内容，Layer 3 只处理真正需要语义理解的边界情况。任何优化都应优先加速快路径。
+**MVP 优先，功能够用就发布。** 能跑的 70 分比完美的 0 分更有价值。
 
-**AI 生成规则，而非 AI 做判断。** 每次 AI 调用都应产生可复用的本地规则。判过一次的内容沉淀成规则后，后续拦截成本为零。这个原则将 token 消耗从 O(n) 降低到 O(1)。
+**快路径优先。** Layer 1 拦截 90%+ 内容，Layer 2 处理剩余边界情况。每个优化先看快路径。
 
-**上下文敏感优于简单黑名单。** 任何可能被用于攻击的词，同时也可能在正常语境中出现。触发词加周边语境的组合判断，误杀率远低于简单屏蔽。宁可漏检一条变体攻击，也不可误杀一条正常内容。
+**三级降级。** 每个功能路径都有 fallback，永远不静默崩溃。
 
-**远程分发优于内置打包。** 词库、规则、平台配置都应独立于脚本文件。更新规则不应要求用户重新安装脚本。参考 uBlock Origin 的种子词库加远程订阅模式。
+**上下文敏感优于简单黑名单。** 触发词 + 周边负面信号组合判断，宁可漏检也不误杀。
 
-**给用户控制权。** Token 消耗上限、灵敏度、自动拉黑、AI 模式——全部做成可配置的开关。工具的边界由用户定义，不是开发者强制决定。
+**远程分发优于内置打包。** 词库独立于脚本，更新规则不要求用户重装。
 
-**三级降级。** 每个功能路径都应有 fallback。API 调用失败回退 DOM 模拟，DOM 模拟失败回退通知用户。远程词库拉取失败回退本地种子词。AI 服务不可用时纯规则引擎继续工作。
+**数据本地化。** 所有数据存本地 `GM_setValue`，不上传任何服务器。
+
+**给用户控制权。** 灵敏度、自动拉黑全部可配置，用户决定工具边界。

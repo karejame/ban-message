@@ -11,6 +11,7 @@ const strings = {
     high: '高',
     autoBlock: '自动拉黑',
     aiMode: 'AI 增强',
+    aiDisabled: 'AI 能力暂不可用（需配置 API 密钥）',
     apiKey: 'API 密钥',
     evidence: '取证记录',
     export: '导出数据',
@@ -34,6 +35,7 @@ const strings = {
     feedFound: '找到 {n} 条评论',
     feedNoMatch: '未匹配到评论区',
     diagnose: '诊断',
+    view: '查看',
     recentScan: '最近扫描',
 
     // ── 运行状态面板 ──────────────────────────────────────────────────────
@@ -64,6 +66,17 @@ const strings = {
     customClearAllConfirm: '确定要删除全部 {n} 个自定义过滤词吗？此操作不可撤销。',
     customCleared: '自定义过滤词已清空',
     customDeleted: '已删除 "{keyword}"',
+
+    // ── 规则查看 ────────────────────────────────────────────────────────────
+    rulesTitle: '屏蔽规则',
+    rulesHard: '硬关键词（直接屏蔽）',
+    rulesSoft: '软关键词（敏感检测）',
+    rulesRegex: '正则表达式',
+    rulesCustom: '自定义关键词',
+    rulesVariant: '变体映射',
+    rulesPinyin: '拼音映射',
+    rulesClose: '关闭',
+    rulesCount: '共 {n} 条规则',
 
     // ── 刷屏/骚扰检测 ──────────────────────────────────────────────────
     spamLabel: '检测到刷屏内容，已自动隐藏',
@@ -117,6 +130,16 @@ const strings = {
     contextRulesCount: '{n} 条激活',
     refresh: '刷新',
     refreshing: '刷新中...',
+
+    // ── 隐私声明 ──────────────────────────────────────────────────────
+    privacyTitle: '隐私声明',
+    privacyText: '所有数据（取证日志、用户规则、配置）仅存储在本地浏览器，不上传任何服务器。',
+
+    // ── 关于 ────────────────────────────────────────────────────────
+    aboutTitle: '关于',
+    aboutText: 'CyberShield v{ver} - 网暴保护盾',
+    aboutPrivacy: '隐私声明',
+    aboutGithub: 'GitHub',
   },
   en: {
     panelTitle: 'CyberShield',
@@ -128,6 +151,7 @@ const strings = {
     high: 'High',
     autoBlock: 'Auto-block',
     aiMode: 'AI Mode',
+    aiDisabled: 'AI unavailable (API key required)',
     apiKey: 'API Key',
     evidence: 'Evidence',
     export: 'Export',
@@ -151,6 +175,7 @@ const strings = {
     feedFound: '{n} comments found',
     feedNoMatch: 'No comment elements found',
     diagnose: 'Diagnose',
+    view: 'View',
     recentScan: 'Recent',
 
     // ── Status panel ──────────────────────────────────────────────────────
@@ -181,6 +206,17 @@ const strings = {
     customClearAllConfirm: 'Delete all {n} custom keywords? This cannot be undone.',
     customCleared: 'Custom keywords cleared',
     customDeleted: 'Deleted "{keyword}"',
+
+    // ── Rules View ────────────────────────────────────────────────────────────
+    rulesTitle: 'Block Rules',
+    rulesHard: 'Hard Keywords (direct block)',
+    rulesSoft: 'Soft Keywords (sensitive detection)',
+    rulesRegex: 'Regex Patterns',
+    rulesCustom: 'Custom Keywords',
+    rulesVariant: 'Variant Mapping',
+    rulesPinyin: 'Pinyin Mapping',
+    rulesClose: 'Close',
+    rulesCount: '{n} rules total',
 
     // ── Spam/harassment detection ───────────────────────────────────
     spamLabel: 'Spam content detected and hidden',
@@ -234,6 +270,16 @@ const strings = {
     contextRulesCount: '{n} active',
     refresh: 'Refresh',
     refreshing: 'Refreshing...',
+
+    // ── Privacy ──────────────────────────────────────────────────────
+    privacyTitle: 'Privacy',
+    privacyText: 'All data (evidence logs, user rules, settings) is stored locally in your browser. No data is uploaded to any server.',
+
+    // ── About ────────────────────────────────────────────────────────
+    aboutTitle: 'About',
+    aboutText: 'CyberShield v{ver} - Harassment Protection',
+    aboutPrivacy: 'Privacy',
+    aboutGithub: 'GitHub',
   },
 };
 

@@ -114,6 +114,21 @@ export class Detector {
   }
 
   /**
+   * 导出所有规则（内置 + 自定义）用于可视化展示
+   * @returns {Object} { hardKeywords, softKeywords, regexPatterns, customKeywords }
+   */
+  getAllRules() {
+    return {
+      hardKeywords: [...this.hardKeywords],
+      softKeywords: [...this.softKeywords],
+      regexPatterns: this.regexPatterns.map(p => p.source),
+      customKeywords: this.config.customKeywords || [],
+      variantMap: this.variantMap,
+      pinyinMap: this.pinyinMap,
+    };
+  }
+
+  /**
    * 主入口 — 运行所有检测层。
    * 同步返回结果对象（AI层结果通过回调添加）。
    *

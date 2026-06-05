@@ -16,20 +16,73 @@ export const RedditPlatform = {
     replyContainer:   '[data-type="comment"][style*="padding-left"]',
   },
 
-  blockStrategy(username, sourceElement) {
-    // Reddit: find the user link, right-click menu isn't reliable.
-    // Strategy: navigate to the block URL via the user profile.
-    // Users must confirm — we can't silently block on Reddit without the API.
-    const userLink = sourceElement?.querySelector('a[href^="/user/"]');
-    if (!userLink) return;
+  getCurrentUser() {
+    const userLink = document.querySelector('a[href^="/user/"]');
+    return userLink?.textContent?.replace('/u/', '') || null;
+  },
 
+  blockStrategy(username, sourceElement) {
+    // Reddit: Three-tier fallback strategy
+    // 1. Try API block (requires modhash)
+    // 2. Try DOM simulation
+    // 3. Fallback to notification
+
+    // Try API first
+    const modhash = this._extractModhash();
+    if (modhash) {
+      this._apiBlock(username, modhash)
+        .then(success => {
+          if (success) return;
+          this._domBlock(username, sourceElement);
+        })
+        .catch(() => this._domBlock(username, sourceElement));
+    } else {
+      this._domBlock(username, sourceElement);
+    }
+  },
+
+  _extractModhash() {
+    // Try to extract modhash from page
+    try {
+      const config = document.querySelector('#config');
+      if (config) {
+        const data = JSON.parse(config.textContent);
+        return data.user?.modhash || null;
+      }
+    } catch (e) {}
+    return null;
+  },
+
+  async _apiBlock(username, modhash) {
+    try {
+      const response = await fetch('/api/block_user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: `name=${encodeURIComponent(username)}&uh=${modhash}`,
+      });
+      return response.ok;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  _domBlock(username, sourceElement) {
+    const userLink = sourceElement?.querySelector('a[href^="/user/"]');
+    if (!userLink) {
+      GM_notification({
+        title: '🛡️ CyberShield — Reddit',
+        text:  `请手动拉黑用户 @${username}`,
+      });
+      return;
+    }
+
+    // Open profile in background tab
     const profileUrl = userLink.href;
-    // Open profile in background tab; user can block from there
-    // A more aggressive approach: use Reddit's blocking endpoint (requires auth token extraction)
-    // For MVP, we notify the user to block manually.
     GM_notification({
       text:    `Open ${username}'s profile to block them?`,
-      title:   '🛡️ CyberShield',
+      title:   '🛡️ CyberShield — Reddit',
       onclick: () => window.open(profileUrl, '_blank'),
     });
   },

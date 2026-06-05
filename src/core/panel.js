@@ -47,21 +47,33 @@ export const Panel = {
     this._currentPage = pageNum;
     const page1 = this._el.querySelector('#cs-page-1');
     const page2 = this._el.querySelector('#cs-page-2');
+    const page3 = this._el.querySelector('#cs-page-3');
     const tab1 = this._el.querySelector('#cs-tab-1');
     const tab2 = this._el.querySelector('#cs-tab-2');
+    const tab3 = this._el.querySelector('#cs-tab-3');
 
+    // Hide all pages first
+    if (page1) page1.style.display = 'none';
+    if (page2) page2.style.display = 'none';
+    if (page3) page3.style.display = 'none';
+
+    // Remove active from all tabs
+    if (tab1) tab1.classList.remove('cs-tab-active');
+    if (tab2) tab2.classList.remove('cs-tab-active');
+    if (tab3) tab3.classList.remove('cs-tab-active');
+
+    // Show selected page and activate tab
     if (pageNum === 1) {
       if (page1) page1.style.display = '';
-      if (page2) page2.style.display = 'none';
       if (tab1) tab1.classList.add('cs-tab-active');
-      if (tab2) tab2.classList.remove('cs-tab-active');
-    } else {
-      if (page1) page1.style.display = 'none';
+    } else if (pageNum === 2) {
       if (page2) page2.style.display = '';
-      if (tab1) tab1.classList.remove('cs-tab-active');
       if (tab2) tab2.classList.add('cs-tab-active');
       // 切到日志页时渲染最新日志
       this._renderScanLog();
+    } else if (pageNum === 3) {
+      if (page3) page3.style.display = '';
+      if (tab3) tab3.classList.add('cs-tab-active');
     }
   },
 
@@ -116,6 +128,7 @@ export const Panel = {
     // ★ 多重事件绑定确保 tab 切换万无一失
     const tab1 = el.querySelector('#cs-tab-1');
     const tab2 = el.querySelector('#cs-tab-2');
+    const tab3 = el.querySelector('#cs-tab-3');
     if (tab1) {
       tab1.addEventListener('click', (e) => {
         e.preventDefault();
@@ -137,6 +150,17 @@ export const Panel = {
       tab2.onclick = (e) => {
         e.preventDefault();
         this._switchPage(2);
+      };
+    }
+    if (tab3) {
+      tab3.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._switchPage(3);
+      });
+      tab3.onclick = (e) => {
+        e.preventDefault();
+        this._switchPage(3);
       };
     }
 
@@ -184,6 +208,10 @@ export const Panel = {
 
     el.querySelector('#cs-evidence-btn').addEventListener('click', () => {
       this._showEvidenceModal();
+    });
+
+    el.querySelector('#cs-rules-view-btn').addEventListener('click', () => {
+      this._showRulesModal();
     });
 
     el.querySelector('#cs-export-btn').addEventListener('click', () => {
@@ -876,47 +904,121 @@ export const Panel = {
     }
   },
 
+  _showRulesModal() {
+    const existing = document.getElementById('cs-modal');
+    if (existing) { existing.remove(); return; }
+
+    const rules = this._scannerRef?.detector?.getAllRules() || {};
+    const modal = document.createElement('div');
+    modal.id = 'cs-modal';
+    modal.innerHTML = `
+      <div class="cs-modal-inner" style="max-width:800px;height:80vh">
+        <div class="cs-modal-header">
+          <span>${t('rulesTitle')}</span>
+          <button id="cs-modal-close">x</button>
+        </div>
+        <div class="cs-modal-body" style="display:flex;flex-direction:column;height:100%">
+          <div class="cs-rules-tabs">
+            <button class="cs-rules-tab cs-rules-tab-active" data-tab="hard">${t('rulesHard')} (${rules.hardKeywords?.length || 0})</button>
+            <button class="cs-rules-tab" data-tab="soft">${t('rulesSoft')} (${rules.softKeywords?.length || 0})</button>
+            <button class="cs-rules-tab" data-tab="regex">${t('rulesRegex')} (${rules.regexPatterns?.length || 0})</button>
+            <button class="cs-rules-tab" data-tab="custom">${t('rulesCustom')} (${rules.customKeywords?.length || 0})</button>
+          </div>
+          <div class="cs-rules-content">
+            <div class="cs-rules-panel cs-rules-panel-active" id="cs-rules-hard">
+              ${this._renderKeywordList(rules.hardKeywords || [])}
+            </div>
+            <div class="cs-rules-panel" id="cs-rules-soft">
+              ${this._renderKeywordList(rules.softKeywords || [])}
+            </div>
+            <div class="cs-rules-panel" id="cs-rules-regex">
+              ${this._renderRegexList(rules.regexPatterns || [])}
+            </div>
+            <div class="cs-rules-panel" id="cs-rules-custom">
+              ${this._renderCustomList(rules.customKeywords || [])}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    // Close handlers
+    document.getElementById('cs-modal-close').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+    // Tab switching
+    modal.querySelectorAll('.cs-rules-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        modal.querySelectorAll('.cs-rules-tab').forEach(t => t.classList.remove('cs-rules-tab-active'));
+        modal.querySelectorAll('.cs-rules-panel').forEach(p => p.classList.remove('cs-rules-panel-active'));
+        tab.classList.add('cs-rules-tab-active');
+        modal.querySelector(`#cs-rules-${tab.dataset.tab}`).classList.add('cs-rules-panel-active');
+      });
+    });
+  },
+
   _showEvidenceModal() {
     const existing = document.getElementById('cs-modal');
     if (existing) { existing.remove(); return; }
 
-    const log = this._evidence.getAll();
+    const entries = this._evidence.getAll();
+    const typeLbl = { comment: t('typeComment'), reply: t('typeReply'), message: t('typeMessage') };
     const modal = document.createElement('div');
     modal.id = 'cs-modal';
     modal.innerHTML = `
       <div class="cs-modal-inner">
         <div class="cs-modal-header">
-          <span>${t('modalTitle')} (${log.length})</span>
+          <span>${t('modalTitle')}</span>
+          <span style="font-size:12px;color:var(--cs-text-secondary);font-weight:400">${t('entryCount', { n: entries.length })}</span>
           <button id="cs-modal-close">x</button>
         </div>
         <div class="cs-modal-body">
-          ${log.length === 0
+          ${entries.length === 0
             ? `<p class="cs-empty">${t('emptyLog')}</p>`
-            : log.slice(0, 50).map(entry => {
-              const typeColors = { comment: '#2563eb', reply: '#8b5cf6', message: '#f59e0b' };
-              const typeLabels = { comment: t('typeComment'), reply: t('typeReply'), message: t('typeMessage') };
-              const contentType = entry.contentType || 'comment';
-              const typeColor = typeColors[contentType] || '#888';
-              const typeLabel = typeLabels[contentType] || contentType;
-              return `
+            : entries.slice(0, 100).map(e => `
               <div class="cs-entry">
                 <div class="cs-entry-meta">
-                  <span class="cs-entry-user">@${entry.username}</span>
-                  <span class="cs-entry-type" style="background:${typeColor}15;color:${typeColor}">${typeLabel}</span>
-                  <span class="cs-entry-verdict cs-verdict-${entry.verdict}">${entry.verdict}</span>
-                  <span class="cs-entry-time">${new Date(entry.timestamp).toLocaleString()}</span>
+                  <span class="cs-entry-user">${escapeHtml(e.username)}</span>
+                  <span class="cs-entry-verdict cs-verdict-${e.verdict || 'unknown'}">${e.verdict || '--'}</span>
+                  ${e.contentType ? `<span class="cs-entry-type">${typeLbl[e.contentType] || e.contentType}</span>` : ''}
+                  <span class="cs-entry-time">${new Date(e.timestamp).toLocaleString()}</span>
                 </div>
-                <div class="cs-entry-text">${escapeHtml(entry.text || '')}</div>
-                <div class="cs-entry-url"><a href="${entry.url}" target="_blank">${entry.url?.slice(0, 60)}</a></div>
+                <div class="cs-entry-text">${escapeHtml(e.text || '')}</div>
+                ${e.url ? `<div class="cs-entry-url"><a href="${escapeHtml(e.url)}" target="_blank">${escapeHtml(e.url)}</a></div>` : ''}
               </div>
-            `}).join('')
+            `).join('')
           }
         </div>
       </div>
     `;
     document.body.appendChild(modal);
+
     document.getElementById('cs-modal-close').addEventListener('click', () => modal.remove());
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  },
+
+  _renderKeywordList(keywords) {
+    if (!keywords || keywords.length === 0) return `<p class="cs-empty">${t('emptyLog')}</p>`;
+    const sorted = [...keywords].sort();
+    return `<div class="cs-keyword-list">${sorted.map(k => `<span class="cs-keyword-tag">${escapeHtml(k)}</span>`).join('')}</div>`;
+  },
+
+  _renderRegexList(patterns) {
+    if (!patterns || patterns.length === 0) return `<p class="cs-empty">${t('emptyLog')}</p>`;
+    return `<div class="cs-regex-list">${patterns.map(p => `<code class="cs-regex-item">${escapeHtml(p)}</code>`).join('')}</div>`;
+  },
+
+  _renderCustomList(customs) {
+    if (!customs || customs.length === 0) return `<p class="cs-empty">${t('customEmpty')}</p>`;
+    return customs.map(entry => `
+      <div class="cs-custom-item">
+        <span class="cs-custom-kw">${escapeHtml(entry.keyword)}</span>
+        ${entry.aliases && entry.aliases.length > 0
+          ? `<span class="cs-custom-aliases">${entry.aliases.map(a => escapeHtml(a)).join(', ')}</span>`
+          : ''}
+      </div>
+    `).join('');
   },
 
   _makeDraggable(el) {
@@ -1010,6 +1112,7 @@ function PANEL_HTML(config) {
       <div class="cs-tabs">
         <button id="cs-tab-1" class="cs-tab cs-tab-active">${t('tabControl')}</button>
         <button id="cs-tab-2" class="cs-tab">${t('tabLog')}</button>
+        <button id="cs-tab-3" class="cs-tab">${t('aboutTitle')}</button>
       </div>
 
       <!-- ── 可滚动内容区 ──────────────────────────────────────────── -->
@@ -1096,12 +1199,13 @@ function PANEL_HTML(config) {
         <div class="cs-toggle-row">
           <span class="cs-label">${t('aiMode')}</span>
           <label class="cs-switch">
-            <input type="checkbox" id="cs-ai-toggle" ${config.aiEnabled ? 'checked' : ''}>
+            <input type="checkbox" id="cs-ai-toggle" ${config.aiEnabled ? 'checked' : ''} disabled>
             <span class="cs-slider"></span>
           </label>
         </div>
+        <div class="cs-hint cs-ai-disabled-hint">${t('aiDisabled')}</div>
 
-        <div class="cs-api-row" id="cs-api-key-row" style="display:${config.aiEnabled ? 'flex' : 'none'}">
+        <div class="cs-api-row" id="cs-api-key-row" style="display:none">
           <span class="cs-label cs-label-sm">${t('apiKey')}</span>
           <input type="password" id="cs-api-key" class="cs-input" placeholder="${t('apiKeyPlaceholder')}" value="${config.apiKey || ''}">
           <span class="cs-hint">${t('aiDesc')}</span>
@@ -1135,6 +1239,14 @@ function PANEL_HTML(config) {
             <span class="cs-stats-label">${t('contextRules')}</span>
             <span class="cs-stats-val" id="cs-sys-context">--</span>
           </div>
+        </div>
+
+        <div class="cs-divider"></div>
+
+        <!-- ── 屏蔽规则 ─────────────────────────────────────────── -->
+        <div class="cs-section-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>${t('rulesTitle')}</span>
+          <button id="cs-rules-view-btn" class="cs-btn cs-btn-xs cs-btn-ghost">${t('view')}</button>
         </div>
 
         <div class="cs-divider"></div>
@@ -1184,6 +1296,40 @@ function PANEL_HTML(config) {
           <div class="cs-log-empty">${t('logEmpty')}</div>
         </div>
       </div>
+
+      <!-- ── 第三页面：关于 ──────────────────────────────────────────── -->
+      <div id="cs-page-3" style="display:none">
+        <div class="cs-about-section">
+          <h3 class="cs-about-title">${t('aboutText', { ver: '0.6' })}</h3>
+          <p class="cs-about-text">CyberShield 是一款浏览器插件，用于自动检测和屏蔽网络暴力、骚扰和恶意评论。</p>
+        </div>
+
+        <div class="cs-about-section">
+          <h4 class="cs-about-subtitle">${t('privacyTitle')}</h4>
+          <p class="cs-about-text">${t('privacyText')}</p>
+        </div>
+
+        <div class="cs-about-section">
+          <h4 class="cs-about-subtitle">支持平台</h4>
+          <p class="cs-about-text">Twitter/X、B站、Reddit、微博、YouTube、知乎、贴吧</p>
+        </div>
+
+        <div class="cs-about-section">
+          <h4 class="cs-about-subtitle">功能特性</h4>
+          <ul class="cs-about-list">
+            <li>关键词检测（支持 28 种语言）</li>
+            <li>行为信号分析（全大写、感叹号、emoji）</li>
+            <li>自动拉黑（支持 API 和 DOM 模拟）</li>
+            <li>取证记录（截图 + 日志）</li>
+            <li>自定义关键词管理</li>
+          </ul>
+        </div>
+
+        <div class="cs-about-section">
+          <h4 class="cs-about-subtitle">${t('aboutGithub')}</h4>
+          <a href="https://github.com/your-repo/cyber-shield" target="_blank" class="cs-about-link">https://github.com/your-repo/cyber-shield</a>
+        </div>
+      </div>
       </div><!-- /cs-content -->
     </div>
   `;
@@ -1192,8 +1338,8 @@ function PANEL_HTML(config) {
 // ─── CSS ────────────────────────────────────────────────────────────────────
 
 const PANEL_CSS = `
-  /* ★ CSS 变量作用域在 #cs-panel 下，避免被 Twitter 等站点的 :root 覆盖 */
-  #cs-panel {
+  /* ★ CSS 变量作用域在 #cs-panel 和 #cs-modal 下，避免被 Twitter 等站点的 :root 覆盖 */
+  #cs-panel, #cs-modal {
     --cs-bg: #ffffff;
     --cs-bg-body: #f5f6f8;
     --cs-text: #1a1a2e;
@@ -1219,7 +1365,7 @@ const PANEL_CSS = `
   }
 
   @media (prefers-color-scheme: dark) {
-    #cs-panel {
+    #cs-panel, #cs-modal {
       --cs-bg: #1a1b2e;
       --cs-bg-body: #12132a;
       --cs-text: #e8e8f0;
@@ -1449,6 +1595,7 @@ const PANEL_CSS = `
     font-size: 11px;
     font-weight: 600;
     cursor: pointer;
+    text-align: center;
     transition: background 0.15s, color 0.15s;
   }
 
@@ -1614,6 +1761,8 @@ const PANEL_CSS = `
 
   .cs-switch input:checked + .cs-slider { background: var(--cs-toggle-on); }
   .cs-switch input:checked + .cs-slider::before { transform: translateX(16px); }
+  .cs-switch input:disabled + .cs-slider { opacity: 0.5; cursor: not-allowed; }
+  .cs-switch input:disabled ~ .cs-slider::before { opacity: 0.6; }
 
   .cs-select {
     background: var(--cs-input-bg);
@@ -1646,6 +1795,7 @@ const PANEL_CSS = `
   }
 
   .cs-hint { font-size: 10px; color: var(--cs-text-secondary); line-height: 1.3; }
+  .cs-ai-disabled-hint { margin-top: -4px; font-style: italic; opacity: 0.7; }
 
   .cs-divider { height: 1px; background: var(--cs-divider); margin: 2px 0; }
 
@@ -1881,6 +2031,64 @@ const PANEL_CSS = `
     font-size: 10px;
   }
 
+  /* ── 关于页面 ──────────────────────────────────────────────────── */
+
+  .cs-about-section {
+    margin-bottom: 20px;
+  }
+
+  .cs-about-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--cs-text);
+    margin-bottom: 8px;
+  }
+
+  .cs-about-subtitle {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--cs-text);
+    margin-bottom: 6px;
+  }
+
+  .cs-about-text {
+    font-size: 13px;
+    color: var(--cs-text-secondary);
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }
+
+  .cs-about-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .cs-about-list li {
+    font-size: 13px;
+    color: var(--cs-text-secondary);
+    line-height: 1.6;
+    padding-left: 16px;
+    position: relative;
+  }
+
+  .cs-about-list li::before {
+    content: '•';
+    position: absolute;
+    left: 0;
+    color: var(--cs-accent);
+  }
+
+  .cs-about-link {
+    color: var(--cs-accent);
+    text-decoration: none;
+    font-size: 13px;
+  }
+
+  .cs-about-link:hover {
+    text-decoration: underline;
+  }
+
   /* ── 日志页：复选框 / 已拉黑标记 / 全选行 ─────────────────────── */
 
   .cs-log-check, .cs-log-check-blocked {
@@ -1976,6 +2184,52 @@ const PANEL_CSS = `
   .cs-entry-url a { color: var(--cs-text-secondary); font-size: 10px; text-decoration: none; opacity: 0.6; }
   .cs-entry-url a:hover { opacity: 1; }
   .cs-empty { color: var(--cs-text-secondary); text-align: center; padding: 30px 0; font-size: 13px; }
+
+  /* ── Rules Modal ───────────────────────────────────────────────── */
+  .cs-rules-tabs {
+    display: flex; gap: 8px; padding: 12px 18px;
+    border-bottom: 1px solid var(--cs-divider);
+  }
+
+  .cs-rules-tab {
+    background: none; border: none;
+    padding: 6px 12px; border-radius: 6px;
+    color: var(--cs-text-secondary); font-size: 12px;
+    cursor: pointer; transition: all 0.2s;
+  }
+
+  .cs-rules-tab:hover { background: var(--cs-bg-body); color: var(--cs-text); }
+  .cs-rules-tab-active {
+    background: var(--cs-accent); color: #fff;
+    font-weight: 600;
+  }
+
+  .cs-rules-content { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .cs-rules-panel {
+    display: none; overflow-y: auto; padding: 16px 18px;
+    flex: 1;
+  }
+  .cs-rules-panel-active { display: block; }
+
+  .cs-keyword-list {
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+
+  .cs-keyword-tag {
+    background: var(--cs-bg-body); border: 1px solid var(--cs-border);
+    padding: 4px 10px; border-radius: 12px; font-size: 12px;
+    color: var(--cs-text);
+  }
+
+  .cs-regex-list {
+    display: flex; flex-direction: column; gap: 8px;
+  }
+
+  .cs-regex-item {
+    background: var(--cs-bg-body); border: 1px solid var(--cs-border);
+    padding: 8px 12px; border-radius: 6px; font-family: monospace;
+    font-size: 11px; color: var(--cs-text); word-break: break-all;
+  }
 `;
 
 function escapeHtml(str) {
