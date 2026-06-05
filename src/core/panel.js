@@ -1327,7 +1327,7 @@ function PANEL_HTML(config) {
 
         <div class="cs-about-section">
           <h4 class="cs-about-subtitle">${t('aboutGithub')}</h4>
-          <a href="https://github.com/your-repo/cyber-shield" target="_blank" class="cs-about-link">https://github.com/your-repo/cyber-shield</a>
+          <a href="https://github.com/andykair55-byte/CivilityFilter.git" target="_blank" class="cs-about-link">https://github.com/andykair55-byte/CivilityFilter.git</a>
         </div>
       </div>
       </div><!-- /cs-content -->
