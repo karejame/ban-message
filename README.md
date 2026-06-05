@@ -1,117 +1,166 @@
 # 🛡️ CyberShield
 
-> A userscript that protects you from online harassment — across any platform.
-
-**The problem**: Trolls and coordinated harassment are a global issue. Engaging back escalates things. Platforms do too little.
-
-**The solution**: A Tampermonkey userscript that runs silently in your browser — detecting, blurring, blocking, and archiving toxic content before it reaches you. No platform API dependency. No monthly fees. Just protection.
+> 一款跨平台网暴保护盾 — 自动检测、模糊屏蔽、取证拉黑，一站式解决。
 
 ---
 
-## ✨ Features
+## 🎯 效果预览
 
-| Feature | Description |
-|--------|-------------|
-| 🫥 Content Filter | Toxic comments are auto-blurred with a "show anyway" option |
-| 🚫 Auto-Block | Detected harassers can be muted/blocked automatically |
-| 📸 Evidence Vault | One-click screenshot + auto-logging with timestamp and URL |
-| 🎛️ Control Panel | Floating UI to tune sensitivity, manage whitelist, view history |
+> *截图待补充 — 欢迎贡献屏幕截图*
+
+### 运行效果
+
+```
+┌─────────────────────────────────┐
+│  🛡️ CyberShield  v0.6          │
+│  ┌──────┬──────┬──────┐        │
+│  │ 控制 │ 日志 │ 关于 │        │
+│  └──────┴──────┴──────┘        │
+│  当前平台: twitter.com          │
+│  运行状态: ● 运行中             │
+│  已扫描: 142  已过滤: 8         │
+│  ─────────────────              │
+│  保护开关  [████░░░░]           │
+│  敏感度    [中 ▼]               │
+│  自动拉黑  [████░░░░]           │
+│  ─────────────────              │
+│  [取证记录] [导出数据] [诊断]    │
+└─────────────────────────────────┘
+```
+
+### 评论遮罩效果
+
+```
+┌─────────────────────────────────┐
+│  @user123 · 2小时前              │
+│  ┌───────────────────────────┐  │
+│  │  ⚠️ 检测到可能有害内容      │  │
+│  │     [仍然显示]              │  │
+│  └───────────────────────────┘  │
+└─────────────────────────────────┘
+```
 
 ---
 
-## 🌍 Supported Platforms
+## ✨ 功能特性
 
-### English
-- Twitter / X (`twitter.com`, `x.com`)
-- Reddit (`reddit.com`)
-- YouTube (`youtube.com`)
-
-### Chinese (中文)
-- 微博 Weibo (`weibo.com`)
-- Bilibili B站 (`bilibili.com`)
-- 知乎 Zhihu (`zhihu.com`)
-- 贴吧 Tieba (`tieba.baidu.com`)
-
-### Fallback
-- Generic DOM scanner for any other site
+| 功能 | 说明 |
+|------|------|
+| 🫥 内容遮罩 | 有害评论自动模糊，支持"仍然显示" |
+| 🚫 自动拉黑 | 检测到骚扰可自动执行平台拉黑/屏蔽 |
+| 📸 取证记录 | 一键截图 + 自动记录（时间、用户、内容、URL） |
+| 🎛️ 控制面板 | 悬浮面板实时调节敏感度、管理关键词、查看日志 |
+| 🌐 多语言词库 | 内置 28 种语言的毒词规则库 |
+| 🔍 行为分析 | 全大写、感叹号、emoji 等骚扰信号检测 |
+| 🧠 AI 增强 | 可选 Claude API 深度语义分析（需配置密钥） |
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ 项目结构
 
 ```
 cyber-shield/
+├── cyber-shield.user.js     # 入口（Tampermonkey 头 + 启动引导）
+├── rollup.config.js         # Rollup 构建配置
+├── package.json
+├── default-blacklist.json   # 13000+ 默认黑名单词库
 ├── src/
-│   ├── cyber-shield.user.js   # Main entry (Tampermonkey header + bootstrap)
-│   ├── core/
-│   │   ├── detector.js        # Three-layer toxicity detection engine
-│   │   ├── scanner.js         # MutationObserver DOM watcher
-│   │   ├── blocker.js         # Block/mute action executor
-│   │   └── evidence.js        # Screenshot + evidence logging
-│   ├── platforms/
-│   │   ├── index.js           # Platform registry + auto-detect
-│   │   ├── twitter.js
-│   │   ├── reddit.js
-│   │   ├── youtube.js
-│   │   ├── weibo.js
-│   │   ├── bilibili.js
-│   │   ├── zhihu.js
-│   │   ├── tieba.js
-│   │   └── generic.js
-│   ├── rules/
-│   │   ├── en-patterns.json   # English toxicity rules
-│   │   └── zh-patterns.json   # Chinese toxicity rules (中文规则库)
-│   └── ui/
-│       └── panel.js           # Floating control panel
+│   ├── core/                # 核心引擎
+│   │   ├── detector.js      # 三层检测引擎（关键词→行为→AI）
+│   │   ├── scanner.js       # DOM MutationObserver 监听器
+│   │   ├── blocker.js       # 拉黑/屏蔽执行器
+│   │   ├── evidence.js      # 取证记录（截图 + 日志）
+│   │   ├── panel.js         # 悬浮控制面板 UI
+│   │   ├── ai.js            # Claude AI 集成
+│   │   ├── i18n.js          # 国际化（中/EN）
+│   │   ├── events.js        # 事件总线
+│   │   ├── rule-manager.js  # 远程规则管理
+│   │   ├── context-rule.js  # 上下文规则引擎
+│   │   └── rule-learner.js  # AI 规则学习
+│   ├── platforms/           # 平台适配器
+│   │   ├── index.js         # 注册中心 + 自动检测
+│   │   ├── twitter.js       # Twitter/X
+│   │   ├── reddit.js        # Reddit
+│   │   ├── youtube.js       # YouTube
+│   │   ├── weibo.js         # 微博
+│   │   ├── bilibili.js      # B站
+│   │   ├── zhihu.js         # 知乎
+│   │   ├── tieba.js         # 贴吧
+│   │   └── generic.js       # 通用回退（仅扫描）
+│   └── data/                # 28 种语言规则数据
+│       ├── zh-patterns.json
+│       ├── en-patterns.json
+│       └── ...
 └── dist/
-    └── cyber-shield.user.js   # Built single-file output
+    └── cyber-shield.user.js # 构建后的单文件输出
 ```
 
-### Detection Pipeline
+---
+
+### 三层检测流水线
 
 ```
-Input Text
+用户评论
    │
    ▼
-[Layer 1] Keyword Rules (0ms)      ──── TOXIC ──▶ blur + log
-   │ miss
+[第一层] 关键词规则（~0ms）              ────→ 违规 → 模糊 + 记录
+   │ 未命中
    ▼
-[Layer 2] Behavioral Patterns      ──── WARN ───▶ flag
-   │ miss / ambiguous
+[第二层] 行为信号（~1ms）                ────→ 可疑 → 标记
+   │ 全大写 / 密集标点 / 攻击性 emoji / 短句连发
+   │ 未命中 / 模糊
    ▼
-[Layer 3] Claude AI (async)        ──── TOXIC ──▶ blur + log
+[第三层] Claude AI（~500ms，可选）       ────→ 违规 → 模糊 + 记录
+         结果 → 规则学习器提取新规则
 ```
 
 ---
 
-## 🚀 Installation
+## 🌍 支持平台
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/) for your browser
-2. Click [Install CyberShield](#) _(link coming soon)_
-3. Visit any supported platform — protection starts immediately
-
----
-
-## ⚙️ Configuration
-
-Open the floating 🛡️ panel on any page:
-
-- **Sensitivity**: Low / Medium / High
-- **Whitelist**: Accounts you always want to see
-- **AI Mode**: Enable Claude API for deep analysis
-- **Evidence**: View your saved harassment log
+| 平台 | 适配级别 | 扫描 | 拉黑 |
+|------|---------|------|------|
+| Twitter / X | 专用适配 | ✅ | ✅ DOM模拟 |
+| Reddit | 专用适配 | ✅ | ✅ API+DOM |
+| YouTube | 专用适配 | ✅ | ✅ |
+| 微博 Weibo | 专用适配 | ✅ | ✅ API+DOM |
+| B站 Bilibili | 专用适配 | ✅ | ✅ API |
+| 知乎 Zhihu | 专用适配 | ✅ | ✅ DOM模拟 |
+| 贴吧 Tieba | 专用适配 | ✅ | ✅ |
+| 通用网站 | 扫描回退 | ✅ 仅扫描 | ❌ |
 
 ---
 
-## 🤝 Contributing
+## 🚀 安装
 
-Pull requests welcome! Especially:
-- New platform adapters (`src/platforms/`)
-- Rule improvements (`src/rules/`)
-- Non-English rule sets (Japanese, Korean, Spanish, etc.)
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
+2. 打开 `dist/cyber-shield.user.js` 或访问安装链接（待提供）
+3. 访问任意支持平台 — 自动生效
+
+---
+
+## ⚙️ 使用说明
+
+点击页面右下角的 🛡️ 图标展开控制面板：
+
+- **保护开关** — 启用/禁用全脚本
+- **敏感度** — 低/中/高，调节触发阈值
+- **自动拉黑** — 检测到违规用户自动执行平台拉黑
+- **AI 模式** — 需配置 Claude API Key（当前暂不可用）
+- **自定义过滤词** — 添加/导入/导出个人关键词
+- **取证记录** — 查看历史违规记录
+
+---
+
+## 🤝 贡献指南
+
+欢迎 PR！优先关注：
+- 新增平台适配器（`src/platforms/`）
+- 规则数据完善（`src/data/`）
+- 更多语言词库
 
 ---
 
 ## 📄 License
 
-MIT — use it, fork it, share it.
+MIT
