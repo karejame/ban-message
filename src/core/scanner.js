@@ -796,13 +796,13 @@ export class Scanner {
         for (const el of data.elements) {
           const contentType = this._detectContentType(el);
           const targetEl = this._findTextElement(el, contentType) || el;
-          this._blurContent(targetEl, { reason: `骚扰: @${username}发送${data.count}条回复` }, 'harass');
+          this._blurContent(targetEl, { reason: t('harassReason', { user: username, count: data.count }) }, 'harass');
         }
 
         this.evidence.log({
-          text: `同一用户@${username}发送${data.count}条回复`,
+          text: t('harassEvidence', { user: username, count: data.count }),
           username,
-          result: { verdict: 'harass', reason: `同一用户${data.count}条@回复骚扰`, confidence: 0.9, layer: 2 },
+          result: { verdict: 'harass', reason: t('harassResult', { count: data.count }), confidence: 0.9, layer: 2 },
           url: location.href,
           timestamp: Date.now(),
           contentType: 'reply',
@@ -817,14 +817,14 @@ export class Scanner {
     // ★ 只屏蔽文本内容，而非整个条目
     const contentType = this._detectContentType(el);
     const targetEl = this._findTextElement(el, contentType) || el;
-    this._blurContent(targetEl, { reason: `刷屏: 相同内容重复${count}次` }, 'spam');
+    this._blurContent(targetEl, { reason: t('spamReason', { count }) }, 'spam');
 
     // 扫描日志记录
     emit('scan:result', {
       text: text.slice(0, 200),
       username: '(spam)',
       verdict: 'toxic',
-      reason: `刷屏: 重复${count}次`,
+      reason: t('spamResult', { count }),
       confidence: 0.95,
       contentType: 'comment', // 刷屏总是评论类
       timestamp: Date.now(),
@@ -1376,6 +1376,7 @@ GM_addStyle(`
     border: 1px solid var(--cs-danger, #ef4444);
     border-radius: 6px;
     background: color-mix(in srgb, var(--cs-danger, #ef4444) 10%, var(--cs-bg, #fff));
+    background: rgba(239, 68, 68, 0.08);
     color: var(--cs-danger, #ef4444);
     cursor: pointer;
     font-size: 11px;

@@ -39,7 +39,7 @@ import { on } from './src/core/events.js';
   // ─── Bootstrap ──────────────────────────────────────────────────────────────
 
   const CyberShield = {
-    version: '0.3.0',
+    version: '0.6.1',
     config: null,
     platform: null,
     scanner: null,

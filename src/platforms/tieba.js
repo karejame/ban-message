@@ -2,6 +2,8 @@
  * platforms/tieba.js — 百度贴吧 Adapter
  */
 
+import { t } from '../core/i18n.js';
+
 export const TiebaPlatform = {
   name: '贴吧 Tieba',
   hostnames: ['tieba.baidu.com'],
@@ -17,7 +19,7 @@ export const TiebaPlatform = {
     // 贴吧 has very limited block UI - best we can do is notify
     GM_notification({
       title: '🛡️ CyberShield — 贴吧',
-      text:  `请手动屏蔽用户 ${username}（贴吧暂不支持自动拉黑）`,
+      text:  t('tiebaManual', { user: username }),
     });
   },
 };

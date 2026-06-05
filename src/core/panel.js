@@ -1,5 +1,5 @@
 import { Evidence } from './evidence.js';
-import { t, getLang, toggleLang } from './i18n.js';
+import { t, toggleLang } from './i18n.js';
 import { on, emit } from './events.js';
 
 export const Panel = {
@@ -125,7 +125,6 @@ export const Panel = {
     const el = this._el;
 
     // ── 页面切换 Tab ──────────────────────────────────────────────────────
-    // ★ 多重事件绑定确保 tab 切换万无一失
     const tab1 = el.querySelector('#cs-tab-1');
     const tab2 = el.querySelector('#cs-tab-2');
     const tab3 = el.querySelector('#cs-tab-3');
@@ -135,11 +134,6 @@ export const Panel = {
         e.stopPropagation();
         this._switchPage(1);
       });
-      // 备用 onclick：即使 addEventListener 被干扰，onclick 也能触发
-      tab1.onclick = (e) => {
-        e.preventDefault();
-        this._switchPage(1);
-      };
     }
     if (tab2) {
       tab2.addEventListener('click', (e) => {
@@ -147,10 +141,6 @@ export const Panel = {
         e.stopPropagation();
         this._switchPage(2);
       });
-      tab2.onclick = (e) => {
-        e.preventDefault();
-        this._switchPage(2);
-      };
     }
     if (tab3) {
       tab3.addEventListener('click', (e) => {
@@ -158,10 +148,6 @@ export const Panel = {
         e.stopPropagation();
         this._switchPage(3);
       });
-      tab3.onclick = (e) => {
-        e.preventDefault();
-        this._switchPage(3);
-      };
     }
 
     // ── 语言切换 ────────────────────────────────────────────────────────
@@ -1104,7 +1090,7 @@ function PANEL_HTML(config) {
     <div id="cs-body">
       <div class="cs-panel-header">
         <span class="cs-panel-title">${t('panelTitle')}</span>
-        <span class="cs-panel-badge">v0.6</span>
+        <span class="cs-panel-badge">${t('version', { ver: '0.6.1' })}</span>
         <button id="cs-lang-btn" class="cs-lang-btn" title="${t('langSwitchHint')}">${t('langSwitch')}</button>
       </div>
 
@@ -1300,8 +1286,8 @@ function PANEL_HTML(config) {
       <!-- ── 第三页面：关于 ──────────────────────────────────────────── -->
       <div id="cs-page-3" style="display:none">
         <div class="cs-about-section">
-          <h3 class="cs-about-title">${t('aboutText', { ver: '0.6' })}</h3>
-          <p class="cs-about-text">CyberShield 是一款浏览器插件，用于自动检测和屏蔽网络暴力、骚扰和恶意评论。</p>
+          <h3 class="cs-about-title">${t('aboutText', { ver: '0.6.1' })}</h3>
+          <p class="cs-about-text">${t('aboutDesc')}</p>
         </div>
 
         <div class="cs-about-section">
@@ -1310,18 +1296,18 @@ function PANEL_HTML(config) {
         </div>
 
         <div class="cs-about-section">
-          <h4 class="cs-about-subtitle">支持平台</h4>
-          <p class="cs-about-text">Twitter/X、B站、Reddit、微博、YouTube、知乎、贴吧</p>
+          <h4 class="cs-about-subtitle">${t('aboutPlatforms')}</h4>
+          <p class="cs-about-text">${t('aboutPlatforms')}</p>
         </div>
 
         <div class="cs-about-section">
-          <h4 class="cs-about-subtitle">功能特性</h4>
+          <h4 class="cs-about-subtitle">${t('aboutFeatures')}</h4>
           <ul class="cs-about-list">
-            <li>关键词检测（支持 28 种语言）</li>
-            <li>行为信号分析（全大写、感叹号、emoji）</li>
-            <li>自动拉黑（支持 API 和 DOM 模拟）</li>
-            <li>取证记录（截图 + 日志）</li>
-            <li>自定义关键词管理</li>
+            <li>${t('aboutFeatKeywords')}</li>
+            <li>${t('aboutFeatBehavior')}</li>
+            <li>${t('aboutFeatBlock')}</li>
+            <li>${t('aboutFeatEvidence')}</li>
+            <li>${t('aboutFeatCustom')}</li>
           </ul>
         </div>
 
@@ -1605,7 +1591,7 @@ const PANEL_CSS = `
   }
 
   .cs-tab:not(.cs-tab-active):hover {
-    background: color-mix(in srgb, var(--cs-accent) 15%, var(--cs-bg-body));
+    background: var(--cs-bg-body);
     color: var(--cs-accent);
   }
 
@@ -1696,7 +1682,7 @@ const PANEL_CSS = `
   }
 
   .cs-btn-danger:hover {
-    background: color-mix(in srgb, var(--cs-danger) 85%, #000) !important;
+    opacity: 0.85;
   }
 
   .cs-btn-success {
@@ -1707,7 +1693,7 @@ const PANEL_CSS = `
   }
 
   .cs-btn-success:hover {
-    background: color-mix(in srgb, var(--cs-success) 85%, #000) !important;
+    opacity: 0.85;
   }
 
   .cs-btn-accent {

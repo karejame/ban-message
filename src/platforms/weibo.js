@@ -2,6 +2,8 @@
  * platforms/weibo.js — 微博 Adapter
  */
 
+import { t } from '../core/i18n.js';
+
 export const WeiboPlatform = {
   name: '微博 Weibo',
   hostnames: ['weibo.com', 'weibo.cn'],
@@ -77,7 +79,7 @@ export const WeiboPlatform = {
     if (!userEl) {
       GM_notification({
         title: '🛡️ CyberShield — 微博',
-        text:  `请手动拉黑用户 @${username}`,
+        text:  t('weiboManual', { user: username }),
       });
       return;
     }
@@ -93,7 +95,7 @@ export const WeiboPlatform = {
       } else {
         GM_notification({
           title: '🛡️ CyberShield — 微博',
-          text:  `请手动拉黑用户 @${username}`,
+          text:  t('weiboManual', { user: username }),
         });
       }
     }, 600);

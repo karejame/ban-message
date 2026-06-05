@@ -4,7 +4,7 @@ import resolve from '@rollup/plugin-node-resolve';
 const USERSCRIPT_HEADER = `// ==UserScript==
 // @name         CyberShield
 // @name:zh-CN   CyberShield 网暴保护盾
-// @namespace    https://github.com/yourname/cyber-shield
+// @namespace    https://github.com/andykair55-byte/CivilityFilter.git
 // @version      0.6.1
 // @description  Protect yourself from online harassment. Detects, blurs, and logs toxic content.
 // @description:zh-CN 保护你免受网络暴力。自动检测、屏蔽并记录骚扰内容。

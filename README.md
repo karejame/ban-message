@@ -6,7 +6,7 @@
 
 ## 🎯 效果预览
 
-> *截图待补充 — 欢迎贡献屏幕截图*
+> *(屏幕截图示例区 — 欢迎贡献截图)*
 
 ### 运行效果
 
@@ -134,7 +134,7 @@ cyber-shield/
 ## 🚀 安装
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器扩展
-2. 打开 `dist/cyber-shield.user.js` 或访问安装链接（待提供）
+2. 点击安装 [dist/cyber-shield.user.js](dist/cyber-shield.user.js)（或克隆仓库后自行构建）
 3. 访问任意支持平台 — 自动生效
 
 ---

@@ -162,12 +162,13 @@ const SOURCES = {
 // 远程地址，双 URL 降级（GitHub raw → jsDelivr CDN）
 const REMOTE_URLS = {
   zh: [
-    'https://raw.githubusercontent.com/YOUR/cyber-shield/main/rules/zh-patterns.json',
-    'https://cdn.jsdelivr.net/gh/YOUR/cyber-shield@main/rules/zh-patterns.json',
-  ],
-  en: [
-    'https://raw.githubusercontent.com/YOUR/cyber-shield/main/rules/en-patterns.json',
-    'https://cdn.jsdelivr.net/gh/YOUR/cyber-shield@main/rules/en-patterns.json',
+    'https://raw.githubusercontent.com/andykair55-byte/CivilityFilter/main/src/data/zh-patterns.json',
+
+    'https://cdn.jsdelivr.net/gh/andykair55-byte/CivilityFilter@main/src/data/zh-patterns.json',
+
+    'https://raw.githubusercontent.com/andykair55-byte/CivilityFilter/main/src/data/en-patterns.json',
+
+    'https://cdn.jsdelivr.net/gh/andykair55-byte/CivilityFilter@main/src/data/en-patterns.json',
   ],
 };
 

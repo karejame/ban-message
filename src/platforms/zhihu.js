@@ -2,6 +2,8 @@
  * platforms/zhihu.js — 知乎 Adapter
  */
 
+import { t } from '../core/i18n.js';
+
 export const ZhihuPlatform = {
   name: '知乎 Zhihu',
   hostnames: ['zhihu.com'],
@@ -23,7 +25,7 @@ export const ZhihuPlatform = {
       const blockBtn = document.querySelector('[aria-label="屏蔽"], [class*="block"]');
       blockBtn?.click() || GM_notification({
         title: '🛡️ CyberShield — 知乎',
-        text:  `请手动屏蔽用户 ${username}`,
+        text:  t('zhihuManual', { user: username }),
       });
     }, 600);
   },

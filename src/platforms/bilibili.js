@@ -1,10 +1,8 @@
 /**
  * platforms/bilibili.js — B站 Bilibili Adapter
- *
- * 2026更新：兼容新旧评论系统，支持视频/动态/番剧页面。
- * 新增 waitForComments() 解决异步加载评论区问题。
- * 支持 Web Component + Shadow DOM 深层嵌套结构。
  */
+
+import { t } from '../core/i18n.js';
 
 export const BilibiliPlatform = {
   name: 'Bilibili B站',
@@ -231,7 +229,7 @@ export const BilibiliPlatform = {
     if (!uid) {
       GM_notification({
         title: '🛡️ CyberShield — B站',
-        text: `无法获取用户UID，请手动拉黑 @${username}`,
+        text: t('biliNoUid', { user: username }),
       });
       return;
     }
@@ -242,7 +240,7 @@ export const BilibiliPlatform = {
     if (!biliJct) {
       GM_notification({
         title: '🛡️ CyberShield — B站',
-        text: `请先登录B站，再使用拉黑功能`,
+        text: t('biliLoginReq'),
       });
       return;
     }
@@ -262,26 +260,26 @@ export const BilibiliPlatform = {
             console.log(`[CyberShield] Successfully blocked UID:${uid} (@${username})`);
             GM_notification({
               title: '🛡️ CyberShield — B站',
-              text: `已拉黑 @${username}`,
+              text: t('biliBlocked', { user: username }),
             });
           } else {
             console.warn(`[CyberShield] Block API error: code=${data.code}, msg=${data.message}`);
             GM_notification({
               title: '🛡️ CyberShield — B站',
-              text: `拉黑失败(${data.message})，请手动拉黑 @${username}`,
+              text: t('biliBlockFail', { msg: data.message, user: username }),
             });
           }
         } catch (e) {
           GM_notification({
             title: '🛡️ CyberShield — B站',
-            text: `拉黑请求异常，请手动拉黑 @${username}`,
+            text: t('biliBlockError', { user: username }),
           });
         }
       },
       onerror: () => {
         GM_notification({
           title: '🛡️ CyberShield — B站',
-          text: `拉黑请求失败，请手动拉黑 @${username}`,
+          text: t('biliBlockFailed', { user: username }),
         });
       },
     });
@@ -297,7 +295,7 @@ export const BilibiliPlatform = {
     if (!uid) {
       GM_notification({
         title: '🛡️ CyberShield — B站',
-        text: `无法获取用户UID，请手动取消拉黑 @${username}`,
+        text: t('biliNoUidUnblock', { user: username }),
       });
       return;
     }
@@ -308,7 +306,7 @@ export const BilibiliPlatform = {
     if (!biliJct) {
       GM_notification({
         title: '🛡️ CyberShield — B站',
-        text: `请先登录B站，再使用取消拉黑功能`,
+        text: t('biliLoginReqUnblock'),
       });
       return;
     }
@@ -328,26 +326,26 @@ export const BilibiliPlatform = {
             console.log(`[CyberShield] Successfully unblocked UID:${uid} (@${username})`);
             GM_notification({
               title: '🛡️ CyberShield — B站',
-              text: `已取消拉黑 @${username}`,
+              text: t('biliUnblocked', { user: username }),
             });
           } else {
             console.warn(`[CyberShield] Unblock API error: code=${data.code}, msg=${data.message}`);
             GM_notification({
               title: '🛡️ CyberShield — B站',
-              text: `取消拉黑失败(${data.message})，请手动取消拉黑 @${username}`,
+              text: t('biliUnblockFail', { msg: data.message, user: username }),
             });
           }
         } catch (e) {
           GM_notification({
             title: '🛡️ CyberShield — B站',
-            text: `取消拉黑请求异常，请手动取消拉黑 @${username}`,
+            text: t('biliUnblockError', { user: username }),
           });
         }
       },
       onerror: () => {
         GM_notification({
           title: '🛡️ CyberShield — B站',
-          text: `取消拉黑请求失败，请手动取消拉黑 @${username}`,
+          text: t('biliUnblockFailed', { user: username }),
         });
       },
     });
