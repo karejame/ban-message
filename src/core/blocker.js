@@ -10,41 +10,59 @@ export class Blocker {
     this.platform = platform;
     this.config   = config;
     this._queue   = new Map(); // username → debounce timer
+    // ★ 全局已拉黑集合：防止同一用户被重复拉黑（无论来自手动还是自动路径）
+    this._blockedSet = new Set(JSON.parse(GM_getValue('cs_blocked', '[]')));
   }
 
   /**
-   * Block a user. Debounced to avoid spamming if same user appears many times.
+   * Block a user. Debounced + globally deduplicated.
+   * ★ 如果用户已在 _blockedSet 中，直接跳过，不发请求。
+   * ★ 用户名会自动归一化（trim + lowercase）以应对不同元素提取的细微差异。
    * @param {string} username
    * @param {Element} sourceElement  The comment element that triggered this
    */
   block(username, sourceElement) {
-    if (this._queue.has(username)) return; // already pending
+    const normalized = username?.trim().toLowerCase() || username;
+    if (!normalized) return;
+
+    // ★ 全局去重：已拉黑的用户不再重复发送 API 请求
+    if (this._blockedSet.has(normalized)) {
+      console.log(`[CyberShield] Skip already-blocked: @${username}`);
+      return;
+    }
+    if (this._queue.has(normalized)) return; // already pending
 
     const timer = setTimeout(() => {
       this._executeBlock(username, sourceElement);
-      this._queue.delete(username);
+      // ★ 标记为已拉黑（无论 API 成功与否，避免无限重试）
+      this._blockedSet.add(normalized);
+      this._persistBlocked();
+      this._queue.delete(normalized);
     }, 800);
 
-    this._queue.set(username, timer);
+    this._queue.set(normalized, timer);
   }
 
   /**
    * Cancel a pending block (e.g. user clicked "undo")
    */
   cancel(username) {
-    const timer = this._queue.get(username);
+    const normalized = username?.trim().toLowerCase() || username;
+    const timer = this._queue.get(normalized);
     if (timer) {
       clearTimeout(timer);
-      this._queue.delete(username);
+      this._queue.delete(normalized);
     }
   }
 
   /**
    * Unblock a user via platform's unblockStrategy.
+   * ★ 同时从 _blockedSet 中移除，允许将来再次拉黑。
    * @param {string} username
    * @param {string} uid
    */
   unblock(username, uid) {
+    const normalized = username?.trim().toLowerCase() || username;
     const strategy = this.platform.unblockStrategy;
     if (!strategy) {
       console.warn(`[CyberShield] No unblock strategy for ${this.platform.name}`);
@@ -52,13 +70,33 @@ export class Blocker {
     }
     try {
       strategy.call(this.platform, username, uid);
+      // ★ 从已拉黑集合中移除
+      this._blockedSet.delete(normalized);
+      this._persistBlocked();
       console.log(`[CyberShield] Unblocked: @${username}`);
     } catch (err) {
       console.error(`[CyberShield] Unblock failed for @${username}:`, err);
     }
   }
 
+  /**
+   * 检查用户是否已被拉黑。
+   * @param {string} username
+   * @returns {boolean}
+   */
+  isBlocked(username) {
+    const normalized = username?.trim().toLowerCase() || username;
+    return this._blockedSet.has(normalized);
+  }
+
   // ── Internal ──────────────────────────────────────────────────────────────────
+
+  /**
+   * 持久化已拉黑集合到 GM storage。
+   */
+  _persistBlocked() {
+    GM_setValue('cs_blocked', JSON.stringify([...this._blockedSet]));
+  }
 
   _executeBlock(username, sourceElement) {
     const strategy = this.platform.blockStrategy;

@@ -1,11 +1,11 @@
 // ─── Module imports ───────────────────────────────────────────────────────────
-import { Detector, Verdict } from './detector.js';
-import { Scanner } from './scanner.js';
-import { Blocker } from './blocker.js';
-import { Evidence } from './evidence.js';
-import { PlatformRegistry } from './index.js';
-import { Panel } from './panel.js';
-import { on } from './events.js';
+import { Detector, Verdict } from './src/core/detector.js';
+import { Scanner } from './src/core/scanner.js';
+import { Blocker } from './src/core/blocker.js';
+import { Evidence } from './src/core/evidence.js';
+import { PlatformRegistry } from './src/platforms/index.js';
+import { Panel } from './src/core/panel.js';
+import { on } from './src/core/events.js';
 
 (function () {
   'use strict';
@@ -62,8 +62,8 @@ import { on } from './events.js';
         // ── 监听配置变更事件 ────────────────────────────────────────────────
         on('config:updated', (data) => {
           if (data.type === 'customKeywords') {
-            console.log('[CyberShield] Config updated, rebuilding detector...');
-            this.scanner.detector = new Detector(this.config);
+            console.log('[CyberShield] Custom keywords changed, syncing detector...');
+            this.scanner.detector.reloadCustomKeywords();
             this.scanner._updateRuleCounts();
           }
         });

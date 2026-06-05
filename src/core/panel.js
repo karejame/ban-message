@@ -24,14 +24,21 @@ export const Panel = {
       isRunning: true,
     };
     this._scanLog = [];
-    this._blockedSet = new Set(JSON.parse(GM_getValue('cs_blocked', '[]')));
+    // ★ _blockedSet 现由 Blocker 统一管理，Panel 通过 getter 访问
     this._inject();
     this._bind();
     this._listen();
   },
 
+  /** 访问 blocker 的已拉黑集合 */
+  get _blockedSet() {
+    return this._scannerRef?.blocker?._blockedSet || new Set();
+  },
+
   _persistBlocked() {
-    GM_setValue('cs_blocked', JSON.stringify([...this._blockedSet]));
+    if (this._scannerRef?.blocker) {
+      this._scannerRef.blocker._persistBlocked();
+    }
   },
 
   // ── 页面切换 ─────────────────────────────────────────────────────────────
@@ -87,6 +94,17 @@ export const Panel = {
     el.innerHTML = PANEL_HTML(this._config);
     document.body.appendChild(el);
     this._el = el;
+
+    // ★ 恢复上次保存的位置，若无则默认右下角
+    const restored = this._restorePosition();
+    if (!restored) {
+      // 默认位置：右下角，用 left/top 定位
+      el.style.left = `${window.innerWidth - 62}px`;
+      el.style.top = `${window.innerHeight - 62}px`;
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+    }
+
     this._setCollapsed(true);
     this._switchPage(1);
   },
@@ -95,14 +113,32 @@ export const Panel = {
     const el = this._el;
 
     // ── 页面切换 Tab ──────────────────────────────────────────────────────
-    el.querySelector('#cs-tab-1')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._switchPage(1);
-    }, { capture: true });
-    el.querySelector('#cs-tab-2')?.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._switchPage(2);
-    }, { capture: true });
+    // ★ 多重事件绑定确保 tab 切换万无一失
+    const tab1 = el.querySelector('#cs-tab-1');
+    const tab2 = el.querySelector('#cs-tab-2');
+    if (tab1) {
+      tab1.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._switchPage(1);
+      });
+      // 备用 onclick：即使 addEventListener 被干扰，onclick 也能触发
+      tab1.onclick = (e) => {
+        e.preventDefault();
+        this._switchPage(1);
+      };
+    }
+    if (tab2) {
+      tab2.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this._switchPage(2);
+      });
+      tab2.onclick = (e) => {
+        e.preventDefault();
+        this._switchPage(2);
+      };
+    }
 
     // ── 语言切换 ────────────────────────────────────────────────────────
     el.querySelector('#cs-lang-btn')?.addEventListener('click', () => this._switchLang());
@@ -158,15 +194,22 @@ export const Panel = {
       this._runDiagnose();
     });
 
+    // ── 系统状态刷新 ──────────────────────────────────────────────────
+    el.querySelector('#cs-sys-refresh')?.addEventListener('click', () => {
+      this._refreshSystemStatus();
+    });
+
     // ── 自定义关键词管理 ──────────────────────────────────────────────────
     el.querySelector('#cs-custom-add-btn')?.addEventListener('click', () => {
       this._addCustomKeyword();
     });
 
     el.querySelector('#cs-custom-input')?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') this._addCustomKeyword();
+      if (e.key === 'Enter') { this._addCustomKeyword(); }
     });
-
+    el.querySelector('#cs-custom-clear-btn')?.addEventListener('click', () => {
+      this._clearAllCustomKeywords();
+    });
     el.querySelector('#cs-custom-import-btn')?.addEventListener('click', () => {
       this._importCustomKeywords();
     });
@@ -214,6 +257,7 @@ export const Panel = {
   /**
    * 拉黑选中的用户。
    * 遍历日志列表中勾选的checkbox，逐个调用 blocker.block()。
+   * ★ 去重：同一用户只拉黑一次，避免多次请求。
    */
   _blockSelected() {
     if (!this._scannerRef) {
@@ -230,10 +274,23 @@ export const Panel = {
       return;
     }
 
-    let blocked = 0;
+    // ★ 去重：同一用户只处理一次
+    const toBlock = new Map(); // username → uid
     for (const cb of checks) {
       const username = cb.dataset.username;
       const uid = cb.dataset.uid;
+      if (!toBlock.has(username)) {
+        toBlock.set(username, uid);
+      }
+    }
+
+    let blocked = 0;
+    for (const [username, uid] of toBlock) {
+      // ★ 跳过已拉黑的用户
+      if (this._blockedSet.has(username)) {
+        console.log(`[CyberShield] Skip already-blocked: @${username}`);
+        continue;
+      }
 
       // 构造合成元素，包含 UID 信息
       let sourceEl;
@@ -334,6 +391,111 @@ export const Panel = {
 
   _setCollapsed(collapsed) {
     this._el.classList.toggle('cs-collapsed', collapsed);
+    // ★ 展开/折叠时保持按钮左边缘位置不变
+    this._anchorOnToggle(collapsed);
+  },
+
+  /** 展开/折叠时以按钮左边缘为锚点，面板向右展开 */
+  _anchorOnToggle(collapsed) {
+    const el = this._el;
+    const rect = el.getBoundingClientRect();
+
+    if (collapsed) {
+      // 折叠时：记录当前左边缘位置
+      el.style.left = `${rect.left}px`;
+      el.style.top = `${rect.top}px`;
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+    } else {
+      // 展开时：以按钮左边缘为锚点，面板向右展开
+      const toggleEl = el.querySelector('#cs-toggle');
+      const toggleRect = toggleEl.getBoundingClientRect();
+      el.style.left = `${toggleRect.left}px`;
+      el.style.top = `${toggleRect.top}px`;
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+    }
+
+    // ★ 持久化位置
+    this._savePosition();
+  },
+
+  /** 保存面板位置到 GM 存储 */
+  _savePosition() {
+    const rect = this._el.getBoundingClientRect();
+    GM_setValue('cs_panel_pos', JSON.stringify({ left: rect.left, top: rect.top }));
+  },
+
+  /** 从 GM 存储恢复面板位置，返回是否成功 */
+  _restorePosition() {
+    try {
+      const saved = GM_getValue('cs_panel_pos', null);
+      if (saved) {
+        const { left, top } = JSON.parse(saved);
+        // 确保位置在可视区域内
+        const clampedLeft = Math.max(0, Math.min(left, window.innerWidth - 50));
+        const clampedTop = Math.max(0, Math.min(top, window.innerHeight - 50));
+        this._el.style.left = `${clampedLeft}px`;
+        this._el.style.top = `${clampedTop}px`;
+        this._el.style.right = 'auto';
+        this._el.style.bottom = 'auto';
+        return true;
+      }
+    } catch (e) {
+      console.warn('[CyberShield] Failed to restore panel position:', e);
+    }
+    return false;
+  },
+
+  /** 刷新系统状态（远程词库、AI 用量、上下文规则） */
+  _refreshSystemStatus() {
+    const btn = this._el.querySelector('#cs-sys-refresh');
+    if (btn) {
+      btn.textContent = t('refreshing');
+      btn.disabled = true;
+    }
+
+    // 收集并渲染状态
+    this._renderSystemStatus();
+
+    // 按钮恢复
+    setTimeout(() => {
+      if (btn) {
+        btn.textContent = t('refresh');
+        btn.disabled = false;
+      }
+    }, 2000);
+  },
+
+  /** 渲染系统状态信息 */
+  _renderSystemStatus() {
+    const scanner = this._scannerRef;
+    if (!scanner) return;
+
+    // 1. 远程词库状态
+    const remoteEl = this._el.querySelector('#cs-sys-remote');
+    if (remoteEl && scanner.ruleManager) {
+      const status = scanner.ruleManager.getStatus();
+      remoteEl.textContent = status.lastUpdate !== 'never'
+        ? t('remoteUpdated', { time: status.lastUpdate })
+        : t('remoteNever');
+    }
+
+    // 2. AI 用量
+    const aiEl = this._el.querySelector('#cs-sys-ai');
+    if (aiEl && scanner.aiAnalyzer) {
+      const used = scanner.aiAnalyzer.getTodayUsage();
+      const limit = scanner.aiAnalyzer.getDailyLimit();
+      aiEl.textContent = `${t('aiUsed', { n: used })} / ${t('aiDailyLimit', { n: limit })}`;
+      aiEl.style.color = used >= limit ? 'var(--cs-danger)' : '';
+    }
+
+    // 3. 上下文规则
+    const ctxEl = this._el.querySelector('#cs-sys-context');
+    if (ctxEl && scanner.detector) {
+      const rules = scanner.detector.contextRuleEngine?.getAllRules() || [];
+      ctxEl.textContent = t('contextRulesCount', { n: rules.length });
+    }
   },
 
   _updateStatus() {
@@ -348,6 +510,9 @@ export const Panel = {
 
     // 更新统计面板中的运行状态
     this._renderStats();
+
+    // 更新系统状态
+    this._renderSystemStatus();
   },
 
   _save() {
@@ -567,10 +732,29 @@ export const Panel = {
 
   _removeCustomKeyword(index) {
     if (!this._config.customKeywords) return;
+    const entry = this._config.customKeywords[index];
+    if (!entry) return;
+
+    // 确认对话框
+    if (!confirm(t('customDelConfirm', { keyword: entry.keyword }))) return;
+
     this._config.customKeywords.splice(index, 1);
     this._save();
     this._renderCustomKeywords();
     emit('config:updated', { type: 'customKeywords' });
+  },
+
+  _clearAllCustomKeywords() {
+    const count = this._config.customKeywords?.length || 0;
+    if (count === 0) return;
+
+    if (!confirm(t('customClearAllConfirm', { n: count }))) return;
+
+    this._config.customKeywords = [];
+    this._save();
+    this._renderCustomKeywords();
+    emit('config:updated', { type: 'customKeywords' });
+    console.log(`[CyberShield] ${t('customCleared')}`);
   },
 
   _renderCustomKeywords() {
@@ -768,7 +952,13 @@ export const Panel = {
       el.style.top = `${startTop + dy}px`;
     });
 
-    document.addEventListener('mouseup', () => { dragging = false; });
+    document.addEventListener('mouseup', () => {
+      if (dragging && didDrag) {
+        // ★ 拖拽结束后保存位置
+        this._savePosition();
+      }
+      dragging = false;
+    });
 
     toggle.addEventListener('click', (e) => {
       if (didDrag) {
@@ -812,15 +1002,18 @@ function PANEL_HTML(config) {
     <div id="cs-body">
       <div class="cs-panel-header">
         <span class="cs-panel-title">${t('panelTitle')}</span>
-        <span class="cs-panel-badge">v0.5</span>
+        <span class="cs-panel-badge">v0.6</span>
         <button id="cs-lang-btn" class="cs-lang-btn" title="${t('langSwitchHint')}">${t('langSwitch')}</button>
       </div>
 
-      <!-- ── 页面切换 Tab ──────────────────────────────────────────── -->
+      <!-- ── 页面切换 Tab（固定在滚动区域外，始终可见） ────────────── -->
       <div class="cs-tabs">
         <button id="cs-tab-1" class="cs-tab cs-tab-active">${t('tabControl')}</button>
         <button id="cs-tab-2" class="cs-tab">${t('tabLog')}</button>
       </div>
+
+      <!-- ── 可滚动内容区 ──────────────────────────────────────────── -->
+      <div id="cs-content">
 
       <!-- ── 第一页面：控制面板 ──────────────────────────────────────── -->
       <div id="cs-page-1">
@@ -924,6 +1117,28 @@ function PANEL_HTML(config) {
 
         <div class="cs-divider"></div>
 
+        <!-- ── 系统状态 ─────────────────────────────────────────── -->
+        <div class="cs-section-header" style="display:flex;justify-content:space-between;align-items:center">
+          <span>${t('sysTitle')}</span>
+          <button id="cs-sys-refresh" class="cs-btn cs-btn-xs cs-btn-ghost">${t('refresh')}</button>
+        </div>
+        <div id="cs-sys-status" class="cs-sys-status">
+          <div class="cs-stats-row">
+            <span class="cs-stats-label">${t('remoteRules')}</span>
+            <span class="cs-stats-val" id="cs-sys-remote">--</span>
+          </div>
+          <div class="cs-stats-row">
+            <span class="cs-stats-label">${t('aiUsage')}</span>
+            <span class="cs-stats-val" id="cs-sys-ai">--</span>
+          </div>
+          <div class="cs-stats-row">
+            <span class="cs-stats-label">${t('contextRules')}</span>
+            <span class="cs-stats-val" id="cs-sys-context">--</span>
+          </div>
+        </div>
+
+        <div class="cs-divider"></div>
+
         <!-- ── 自定义关键词 ─────────────────────────────────────────── -->
         <div class="cs-section-header">
           <span>${t('customTitle')}</span>
@@ -936,6 +1151,7 @@ function PANEL_HTML(config) {
           <div class="cs-custom-empty">${t('customEmpty')}</div>
         </div>
         <div class="cs-btn-row">
+          <button id="cs-custom-clear-btn" class="cs-btn">${t('customClearAll')}</button>
           <button id="cs-custom-import-btn" class="cs-btn">${t('customImport')}</button>
           <button id="cs-custom-export-btn" class="cs-btn">${t('customExport')}</button>
         </div>
@@ -968,6 +1184,7 @@ function PANEL_HTML(config) {
           <div class="cs-log-empty">${t('logEmpty')}</div>
         </div>
       </div>
+      </div><!-- /cs-content -->
     </div>
   `;
 }
@@ -1035,7 +1252,8 @@ const PANEL_CSS = `
   }
 
   /* ★ 重置面板内 input/select 元素，防止外部站点 CSS 覆盖 */
-  #cs-panel input, #cs-panel select {
+  /* ★ 但排除 checkbox，保留原生复选框样式 */
+  #cs-panel input:not([type="checkbox"]), #cs-panel select {
     font-family: inherit !important;
     font-size: inherit !important;
     appearance: none !important;
@@ -1043,10 +1261,25 @@ const PANEL_CSS = `
     outline: none !important;
   }
 
+  /* ★ Checkbox 专用样式：确保可见且可交互 */
+  #cs-panel input[type="checkbox"] {
+    appearance: auto !important;
+    -webkit-appearance: auto !important;
+    width: 15px !important;
+    height: 15px !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    cursor: pointer !important;
+    accent-color: var(--cs-accent) !important;
+    flex-shrink: 0 !important;
+  }
+
   #cs-panel {
     position: fixed !important;
-    bottom: 20px;
-    right: 20px;
+    left: auto;
+    top: auto;
+    right: auto;
+    bottom: auto;
     width: 280px;
     min-width: 280px;
     z-index: 2147483647;
@@ -1059,17 +1292,37 @@ const PANEL_CSS = `
     box-shadow: 0 4px 24px var(--cs-shadow);
     border: 1px solid var(--cs-border);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 40px);
+    transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                background 0.3s ease,
+                border 0.3s ease,
+                box-shadow 0.3s ease,
+                border-radius 0.3s ease;
   }
 
-  #cs-panel.cs-collapsed { width: 280px; }
+  #cs-panel.cs-collapsed {
+    width: auto;
+    min-width: unset;
+    background: transparent !important;
+    border: none;
+    box-shadow: none;
+    border-radius: 50%;
+    overflow: visible;
+  }
   #cs-panel.cs-collapsed #cs-body { display: none; }
+  #cs-panel.cs-collapsed .cs-tabs { display: none; }
+  #cs-panel.cs-collapsed #cs-drag-handle { width: auto; }
+  #cs-panel.cs-collapsed #cs-status-dot { display: none; }
 
   #cs-drag-handle {
     display: flex;
     align-items: center;
     gap: 6px;
     cursor: grab;
-    justify-content: flex-end;
+    justify-content: flex-start;
     width: 100%;
   }
 
@@ -1083,7 +1336,9 @@ const PANEL_CSS = `
     font-size: 18px;
     cursor: pointer;
     box-shadow: 0 2px 12px var(--cs-shadow);
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.25s ease,
+                background 0.25s ease;
     display: flex; align-items: center; justify-content: center;
     padding: 0;
   }
@@ -1091,6 +1346,10 @@ const PANEL_CSS = `
   #cs-toggle:hover {
     transform: scale(1.12);
     box-shadow: 0 4px 20px var(--cs-shadow);
+  }
+
+  #cs-toggle:active {
+    transform: scale(0.95);
   }
 
   .cs-dot {
@@ -1115,14 +1374,26 @@ const PANEL_CSS = `
     display: flex;
     flex-direction: column;
     gap: 8px;
-    animation: csFadeIn 0.2s ease;
-    max-height: 80vh;
+    animation: csFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* ★ 可滚动内容区：只有页面内容滚动，tabs 始终可见 */
+  #cs-content {
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
   @keyframes csFadeIn {
-    from { opacity: 0; transform: translateY(-6px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
   }
 
   .cs-panel-header {
@@ -1166,6 +1437,7 @@ const PANEL_CSS = `
     border: 1px solid var(--cs-border);
     border-radius: 8px;
     overflow: hidden;
+    flex-shrink: 0;
   }
 
   .cs-tab {
@@ -1396,6 +1668,14 @@ const PANEL_CSS = `
   }
 
   .cs-btn-sm { flex: 0 0 auto; padding: 5px 12px; }
+  .cs-btn-xs { flex: 0 0 auto; padding: 2px 8px; font-size: 11px; }
+  .cs-btn-ghost { background: none; border: none; color: var(--cs-accent); cursor: pointer; }
+  .cs-btn-ghost:hover { text-decoration: underline; }
+
+  /* ── 系统状态 ──────────────────────────────────────────────── */
+  .cs-sys-status {
+    padding: 4px 0;
+  }
 
   /* ── 自定义关键词 ─────────────────────────────────────────────── */
 

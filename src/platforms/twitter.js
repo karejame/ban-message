@@ -2,7 +2,7 @@
  * platforms/twitter.js — Twitter / X Adapter
  */
 
-import { domClickBlockStrategy } from './blocker.js';
+import { domClickBlockStrategy } from '../core/blocker.js';
 
 export const TwitterPlatform = {
   name: 'Twitter/X',

@@ -59,6 +59,11 @@ const strings = {
     customEmpty: '暂无自定义关键词',
     customImport: '导入',
     customExport: '导出',
+    customDelConfirm: '确定要删除 "{keyword}" 吗？',
+    customClearAll: '清空全部',
+    customClearAllConfirm: '确定要删除全部 {n} 个自定义过滤词吗？此操作不可撤销。',
+    customCleared: '自定义过滤词已清空',
+    customDeleted: '已删除 "{keyword}"',
 
     // ── 刷屏/骚扰检测 ──────────────────────────────────────────────────
     spamLabel: '检测到刷屏内容，已自动隐藏',
@@ -99,6 +104,19 @@ const strings = {
     blockSelectedDone: '已拉黑 {n} 个用户',
     unblockSelectedDone: '已取消 {n} 个用户的拉黑',
     noUserSelected: '未选中任何用户',
+
+    // ── 系统状态 ──────────────────────────────────────────────────────────
+    sysTitle: '系统状态',
+    remoteRules: '远程词库',
+    remoteUpdated: '更新于 {time}',
+    remoteNever: '从未更新',
+    aiUsage: 'AI 用量',
+    aiUsed: '今日已用 {n} 次',
+    aiDailyLimit: '每日上限 {n} 次',
+    contextRules: '上下文规则',
+    contextRulesCount: '{n} 条激活',
+    refresh: '刷新',
+    refreshing: '刷新中...',
   },
   en: {
     panelTitle: 'CyberShield',
@@ -158,6 +176,11 @@ const strings = {
     customEmpty: 'No custom keywords',
     customImport: 'Import',
     customExport: 'Export',
+    customDelConfirm: 'Delete "{keyword}"?',
+    customClearAll: 'Clear All',
+    customClearAllConfirm: 'Delete all {n} custom keywords? This cannot be undone.',
+    customCleared: 'Custom keywords cleared',
+    customDeleted: 'Deleted "{keyword}"',
 
     // ── Spam/harassment detection ───────────────────────────────────
     spamLabel: 'Spam content detected and hidden',
@@ -198,6 +221,19 @@ const strings = {
     blockSelectedDone: 'Blocked {n} users',
     unblockSelectedDone: 'Unblocked {n} users',
     noUserSelected: 'No users selected',
+
+    // ── System Status ────────────────────────────────────────────────────
+    sysTitle: 'System',
+    remoteRules: 'Remote Rules',
+    remoteUpdated: 'Updated {time}',
+    remoteNever: 'Never',
+    aiUsage: 'AI Usage',
+    aiUsed: '{n} used today',
+    aiDailyLimit: '{n} daily limit',
+    contextRules: 'Context Rules',
+    contextRulesCount: '{n} active',
+    refresh: 'Refresh',
+    refreshing: 'Refreshing...',
   },
 };
 

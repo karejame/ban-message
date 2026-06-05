@@ -1,4 +1,7 @@
 import { Detector, Verdict } from './detector.js';
+import { AIAnalyzer } from './ai.js';
+import { RuleLearner } from './rule-learner.js';
+import { RuleManager } from './rule-manager.js';
 import { Blocker } from './blocker.js';
 import { Evidence } from './evidence.js';
 import { t } from './i18n.js';
@@ -9,6 +12,9 @@ export class Scanner {
     this.platform = platform;
     this.config   = config;
     this.detector = new Detector(config);
+    this.aiAnalyzer = new AIAnalyzer(config);
+    this.ruleLearner = new RuleLearner();
+    this.ruleManager = new RuleManager();
     this.blocker  = new Blocker(platform, config);
     this.evidence = new Evidence(config);
     this.observer = null;
@@ -46,8 +52,17 @@ export class Scanner {
     };
   }
 
+  /** 初始化远程词库 */
+  async initRules() {
+    await this.ruleManager.init();
+    this.ruleManager.mergeToDetector(this.detector);
+  }
+
   async start() {
     if (!this.config.enabled) return;
+
+    // 初始化远程词库（先加载缓存，远程拉取失败不影响继续扫描）
+    await this.initRules();
 
     // ── 根据页面类型选择不同的等待逻辑 ─────────────────────────────────
     const pageType = this.platform.isMessagePage?.();
@@ -609,8 +624,19 @@ export class Scanner {
 
     const context = this._buildContext(el, username);
 
-    const result = this.detector.analyze(text, context, (aiResult) => {
-      if (aiResult?.verdict === Verdict.TOXIC) {
+    const result = this.detector.analyze(text, context, this.aiAnalyzer, (aiResult) => {
+      if (!aiResult) return;
+
+      // 规则学习：AI 判定为 toxic 时提取模式
+      if (aiResult.verdict === Verdict.TOXIC) {
+        const learnContext = {
+          negativeSignals: this._extractNegativeSignals(text),
+        };
+        this.ruleLearner.learn(aiResult, text, learnContext);
+        this.ruleLearner.syncToDetector(this.detector);
+      }
+
+      if (aiResult.verdict === Verdict.TOXIC) {
         this._handleToxic(el, text, username, aiResult, contentType);
       }
     });
@@ -826,7 +852,10 @@ export class Scanner {
     this._blurContent(targetEl, result, 'toxic');
 
     if (this.config.autoBlock && username) {
-      this.blocker.block(username, el);
+      // ★ 已拉黑的用户不再重复触发拉黑，只处理文本屏蔽
+      if (!this.blocker.isBlocked(username)) {
+        this.blocker.block(username, el);
+      }
     }
   }
 
@@ -1198,6 +1227,12 @@ export class Scanner {
       if (childHit) return childHit;
     }
     return null;
+  }
+
+  /** 提取文本中的负面信号词 */
+  _extractNegativeSignals(text) {
+    const signals = ['滚', '去死', '你个', '废物', '蠢', '傻', '恶心', '垃圾', '死', '贱', '骂', '打'];
+    return signals.filter(s => text.includes(s));
   }
 
   _buildContext(el, username) {

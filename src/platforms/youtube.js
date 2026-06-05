@@ -2,7 +2,7 @@
  * platforms/youtube.js — YouTube Adapter
  */
 
-import { domClickBlockStrategy } from './blocker.js';
+import { domClickBlockStrategy } from '../core/blocker.js';
 
 export const YoutubePlatform = {
   name: 'YouTube',

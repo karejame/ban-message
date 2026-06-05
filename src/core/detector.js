@@ -6,8 +6,9 @@
  * Layer 3: Claude AI          (async, ~500ms) — ambiguous gray-zone content
  */
 
-import enPatterns from './en-patterns.json';
-import zhPatterns from './zh-patterns.json';
+import enPatterns from '../data/en-patterns.json';
+import zhPatterns from '../data/zh-patterns.json';
+import { ContextRuleEngine } from './context-rule.js';
 
 // ─── Result schema ────────────────────────────────────────────────────────────
 //
@@ -39,6 +40,7 @@ export class Detector {
   constructor(config) {
     this.config = config;
     this.thresholds = SENSITIVITY[config.sensitivity] || SENSITIVITY.medium;
+    this.contextRuleEngine = new ContextRuleEngine();
     this._buildRuleCache();
   }
 
@@ -71,19 +73,44 @@ export class Detector {
   }
 
   _addCustomKeywords() {
+    this._customKeywordKeys = new Set();
     const customs = this.config.customKeywords || [];
     for (const entry of customs) {
       // 主词作为 hard keyword
       if (entry.keyword) {
-        this.hardKeywords.add(entry.keyword.toLowerCase());
+        const kw = entry.keyword.toLowerCase();
+        // 只追踪非内置的关键词，避免误删内置规则
+        if (!this.hardKeywords.has(kw)) {
+          this._customKeywordKeys.add(kw);
+        }
+        this.hardKeywords.add(kw);
       }
       // 别名/联想词也加入
       if (entry.aliases && entry.aliases.length > 0) {
         for (const alias of entry.aliases) {
-          this.hardKeywords.add(alias.toLowerCase());
+          const a = alias.toLowerCase();
+          if (!this.hardKeywords.has(a)) {
+            this._customKeywordKeys.add(a);
+          }
+          this.hardKeywords.add(a);
         }
       }
     }
+  }
+
+  /**
+   * 重新加载自定义关键词（无需重建 Detector）
+   * 删除旧的自定义关键词，添加新的，保留内置/远程/已学习规则
+   */
+  reloadCustomKeywords() {
+    // 1. 移除之前添加的自定义关键词
+    if (this._customKeywordKeys) {
+      for (const kw of this._customKeywordKeys) {
+        this.hardKeywords.delete(kw);
+      }
+    }
+    // 2. 重新添加
+    this._addCustomKeywords();
   }
 
   /**
@@ -92,9 +119,10 @@ export class Detector {
    *
    * @param {string}   text
    * @param {object}   context   { username, platform, isReply, mentionsUser }
+   * @param {object}   aiAnalyzer   AIAnalyzer 实例（用于 Layer 3）
    * @param {Function} onAIResult   Called with final AI result if layer 3 runs
    */
-  analyze(text, context = {}, onAIResult = null) {
+  analyze(text, context = {}, aiAnalyzer = null, onAIResult = null) {
     const normalized = this._normalize(text);
 
     // Layer 1: 关键词 + 变体匹配
@@ -106,8 +134,8 @@ export class Detector {
     if (l2.verdict === Verdict.TOXIC) return l2;
 
     // Layer 3 — async, only if enabled and text is ambiguous
-    if (this.config.aiEnabled && l2.verdict === Verdict.SUSPICIOUS && onAIResult) {
-      this._layerThreeAI(text, context).then(onAIResult);
+    if (this.config.aiEnabled && aiAnalyzer && l2.verdict === Verdict.SUSPICIOUS && onAIResult) {
+      aiAnalyzer.analyze(text, context).then(onAIResult);
     }
 
     return l2.verdict === Verdict.SUSPICIOUS ? l2 : { verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No signals', matched: [] };
@@ -225,6 +253,16 @@ export class Detector {
       signals.push('aggressive_emoji'); score += 0.2;
     }
 
+    // ── 上下文敏感规则评估 ──────────────────────────────────────────────
+    const ctxResult = this.contextRuleEngine.evaluate(text);
+    if (ctxResult) {
+      if (ctxResult.verdict === Verdict.SUSPICIOUS) {
+        return { verdict: Verdict.SUSPICIOUS, confidence: ctxResult.confidence, layer: 2, reason: `Context trigger "${ctxResult.trigger}" + negative signal`, matched: [ctxResult.trigger, ctxResult.matchedSignal] };
+      }
+      // 触发词出现但无负面信号 → SAFE（不误杀）
+      return { verdict: Verdict.SAFE, confidence: 1.0, layer: 2, reason: ctxResult.note, matched: [ctxResult.trigger] };
+    }
+
     if (score >= 0.5) {
       return { verdict: Verdict.TOXIC, confidence: Math.min(score, 0.9), layer: 2, reason: 'Behavioral signals', matched: signals };
     }
@@ -232,75 +270,6 @@ export class Detector {
       return { verdict: Verdict.SUSPICIOUS, confidence: score, layer: 2, reason: 'Weak signals', matched: signals };
     }
     return { verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No behavioral signals', matched: [] };
-  }
-
-  // ── Layer 3: Claude AI ────────────────────────────────────────────────────────
-
-  async _layerThreeAI(text, context) {
-    if (!this.config.apiKey) return null;
-
-    const prompt = `You are a content moderation assistant. Analyze this text for harassment, personal attacks, or toxic behavior toward another user.
-
-Text: """${text}"""
-Context: Platform=${context.platform || 'unknown'}, Is a direct reply=${!!context.isReply}
-
-Respond with ONLY valid JSON:
-{
-  "verdict": "toxic" | "suspicious" | "safe",
-  "confidence": 0.0-1.0,
-  "reason": "one sentence explanation"
-}`;
-
-    try {
-      const data = await this._gmFetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.config.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-
-      const raw = data.content?.[0]?.text || '{}';
-      const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
-
-      return {
-        verdict:    result.verdict     || Verdict.SAFE,
-        confidence: result.confidence  || 0.5,
-        layer:      3,
-        reason:     result.reason      || 'AI analysis',
-        matched:    [],
-      };
-    } catch (err) {
-      console.warn('[CyberShield] AI layer failed:', err);
-      return null;
-    }
-  }
-
-  _gmFetch(url, options = {}) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        url,
-        method: options.method || 'GET',
-        headers: options.headers || {},
-        data: options.body,
-        responseType: 'json',
-        onload: (res) => {
-          if (res.status >= 200 && res.status < 300) {
-            resolve(res.response);
-          } else {
-            reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200)}`));
-          }
-        },
-        onerror: reject,
-        ontimeout: () => reject(new Error('Request timed out')),
-      });
-    });
   }
 
   // ── Utilities ────────────────────────────────────────────────────────────────
