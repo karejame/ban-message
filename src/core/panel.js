@@ -2807,7 +2807,7 @@ const PANEL_CSS = `
     display: flex; flex-wrap: wrap; gap: 6px;
   }
   .cs-topic-chip {
-    display: inline-flex; align-items: center; gap: 2px;
+    display: inline-flex; align-items: center; gap: 6px;
     background: var(--cs-bg-body); border: 1px solid var(--cs-border);
     border-radius: 14px; padding: 2px 4px 2px 8px;
     transition: all 0.15s; font-size: 12px;
@@ -2817,14 +2817,14 @@ const PANEL_CSS = `
     border-color: color-mix(in srgb, var(--cs-accent) 40%, transparent);
   }
   .cs-topic-chip-inner {
-    display: inline-flex; align-items: center; gap: 4px;
+    display: inline-flex; align-items: center; gap: 6px;
     cursor: pointer; white-space: nowrap;
   }
   .cs-topic-chip-inner input[type="checkbox"] {
     accent-color: var(--cs-accent); margin: 0;
-    width: 13px; height: 13px;
+    width: 14px; height: 14px;
   }
-  .cs-topic-chip-label { font-size: 11px; line-height: 1.2; }
+  .cs-topic-chip-label { font-size: 12px; line-height: 1.6; }
   .cs-topic-del-btn {
     background: none; border: none; color: var(--cs-text-secondary);
     font-size: 13px; cursor: pointer; padding: 0 3px; line-height: 1;
