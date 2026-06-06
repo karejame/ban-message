@@ -3,7 +3,7 @@
  *
  * Triggers the platform's native block or mute UI actions via DOM simulation.
  * No API calls — purely DOM-based so it works regardless of API access policies.
- */
+ */  
 
 export class Blocker {
   constructor(platform, config) {
