@@ -228,6 +228,22 @@ const strings = {
     sectionRules: '屏蔽规则',
     sectionCustom: '自定义关键词',
 
+    // ── 话题详情 (A12) ────────────────────────────────────────────────────
+    topicDetailTitle: '话题详情',
+    topicDetailDesc: '话题说明',
+    topicDetailKeywords: '匹配关键词',
+    topicDetailAiRules: 'AI 学习规则',
+    topicDetailHits: '命中次数',
+    topicDetailExamples: '匹配示例',
+    topicDetailNoExamples: '暂无匹配记录',
+    topicDetailNoAiRules: '暂无 AI 扩展内容',
+    topicDetailClick: '点击查看详情',
+    topicDetailKeywordCount: '{n} 个关键词',
+    topicDetailEnabled: '已启用',
+    topicDetailDisabled: '已禁用',
+    topicDetailSourceBuiltin: '内置话题',
+    topicDetailSourceUser: '自定义话题',
+
     // ── 可解释性 (A9) ────────────────────────────────────────────────────
     explainTitle: '为什么被拦截',
     explainLayer1: '关键词规则命中',
@@ -482,6 +498,22 @@ const strings = {
     sectionSystem: 'System Status',
     sectionRules: 'Block Rules',
     sectionCustom: 'Custom Keywords',
+
+    // ── Topic Detail (A12) ────────────────────────────────────────────────
+    topicDetailTitle: 'Topic Detail',
+    topicDetailDesc: 'Description',
+    topicDetailKeywords: 'Matching keywords',
+    topicDetailAiRules: 'AI learned rules',
+    topicDetailHits: 'Hit count',
+    topicDetailExamples: 'Matching examples',
+    topicDetailNoExamples: 'No matches yet',
+    topicDetailNoAiRules: 'No AI extensions yet',
+    topicDetailClick: 'Click to view details',
+    topicDetailKeywordCount: '{n} keywords',
+    topicDetailEnabled: 'Enabled',
+    topicDetailDisabled: 'Disabled',
+    topicDetailSourceBuiltin: 'Built-in topic',
+    topicDetailSourceUser: 'Custom topic',
 
     // ── Explainability (A9) ──────────────────────────────────────────────
     explainTitle: 'Why was this filtered',

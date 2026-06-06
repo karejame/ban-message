@@ -748,6 +748,7 @@ export const Panel = {
             <input type="checkbox" class="cs-topic-check" data-topic="${topic.id}" ${topic.enabled ? 'checked' : ''}>
             <span class="cs-topic-chip-label">${label}</span>
           </label>
+          <button class="cs-topic-info-btn" data-topic="${topic.id}" title="${t('topicDetailClick')}">ℹ</button>
           <button class="cs-topic-del-btn" data-topic="${topic.id}" data-name="${label}" title="${t('topicCustomDelete')}">×</button>
         </div>`;
     }).join('');
@@ -789,6 +790,16 @@ export const Panel = {
       });
     });
 
+    // ── 绑定事件：ℹ 查看话题详情 ────────────────────────────────
+    container.querySelectorAll('.cs-topic-info-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const topicId = e.target.dataset.topic;
+        this._showTopicDetail(topicId);
+      });
+    });
+
     // ── 绑定事件：添加自定义话题 ─────────────────────────────────
     const addBtn = container.querySelector('#cs-topic-add-btn');
     const nameInput = container.querySelector('#cs-topic-add-name');
@@ -811,6 +822,140 @@ export const Panel = {
         tf.addUserTopic({ label: name, keywords });
         this._renderTopicList();
       }
+    });
+  },
+
+  // ── 话题详情弹窗 ──────────────────────────────────────────────────────────
+
+  _showTopicDetail(topicId) {
+    const tf = this._scannerRef?.topicFilter;
+    if (!tf) return;
+
+    // 获取话题原始数据
+    const topic = tf.topics[topicId];
+    if (!topic) return;
+    const currentLang = getLang();
+    const label = topic.label?.[currentLang] || topic.label?.zh || topic.id;
+
+    // 获取关键词列表
+    const zhKeywords = topic.keywords?.zh || [];
+    const enKeywords = topic.keywords?.en || [];
+
+    // 从取证记录中统计匹配数 + 获取示例
+    const evidenceLog = this._evidence?.getAll() || [];
+    const matches = evidenceLog.filter(e => {
+      const text = (e.text || '').toLowerCase();
+      const allKws = [...zhKeywords, ...enKeywords];
+      return allKws.some(kw => text.includes(kw.toLowerCase()));
+    });
+
+    // 获取 AI 学习规则
+    let learnedRules = [];
+    if (this._scannerRef?.ruleLearner) {
+      const all = this._scannerRef.ruleLearner.getAllRulesDetailed();
+      learnedRules = [...all.keywords, ...all.contextSensitive];
+    }
+
+    // ── 渲染弹窗 HTML ────────────────────────────────────────────
+    const lang = currentLang;
+    const sourceText = topic.source === 'user'
+      ? t('topicDetailSourceUser')
+      : t('topicDetailSourceBuiltin');
+    const statusText = topic.enabled ? t('topicDetailEnabled') : t('topicDetailDisabled');
+
+    let html = `
+      <div class="cs-topic-detail-overlay" id="cs-topic-detail-overlay">
+        <div class="cs-topic-detail-panel">
+          <div class="cs-topic-detail-header">
+            <span class="cs-topic-detail-title">${label}</span>
+            <span class="cs-topic-detail-source">${sourceText}</span>
+            <button class="cs-topic-detail-close" id="cs-topic-detail-close">&times;</button>
+          </div>
+          <div class="cs-topic-detail-body">
+
+            <div class="cs-topic-detail-hdr">
+              <span class="cs-topic-detail-status ${topic.enabled ? 'cs-topic-status-on' : ''}">${statusText}</span>
+              <span class="cs-topic-detail-kw-count">${t('topicDetailKeywordCount', { n: zhKeywords.length + enKeywords.length })}</span>
+            </div>
+
+            <!-- 关键词列表 -->
+            <div class="cs-topic-detail-section">
+              <div class="cs-topic-detail-section-title">${t('topicDetailKeywords')}</div>
+              <div class="cs-topic-detail-tags">`;
+    if (zhKeywords.length > 0) {
+      html += zhKeywords.map(k => `<span class="cs-topic-detail-tag cs-tag-zh">${k}</span>`).join('');
+    }
+    if (enKeywords.length > 0) {
+      html += enKeywords.map(k => `<span class="cs-topic-detail-tag cs-tag-en">${k}</span>`).join('');
+    }
+    if (zhKeywords.length === 0 && enKeywords.length === 0) {
+      html += `<span class="cs-topic-detail-none">—</span>`;
+    }
+    html += `</div></div>`;
+
+    // 匹配统计
+    html += `
+      <div class="cs-topic-detail-section">
+        <div class="cs-topic-detail-section-title">${t('topicDetailHits')}</div>
+        <div class="cs-topic-detail-stat">${matches.length}</div>
+      </div>`;
+
+    // AI 学习规则
+    html += `
+      <div class="cs-topic-detail-section">
+        <div class="cs-topic-detail-section-title">${t('topicDetailAiRules')}</div>`;
+    if (learnedRules.length > 0) {
+      html += '<ul class="cs-topic-detail-rule-list">';
+      learnedRules.slice(0, 15).forEach(r => {
+        const conf = Math.round(r.confidence * 100);
+        html += `<li class="cs-topic-detail-rule-item">
+          <span class="cs-rule-trigger">${r.trigger}</span>
+          <span class="cs-rule-type">${r.type === 'context_sensitive' ? '🔗' : '🔑'}</span>
+          <span class="cs-rule-conf">${conf}%</span>
+          <span class="cs-rule-hits">${t('topicDetailHits')}: ${r.hitCount || 0}</span>
+        </li>`;
+      });
+      html += '</ul>';
+    } else {
+      html += `<div class="cs-topic-detail-none">${t('topicDetailNoAiRules')}</div>`;
+    }
+    html += `</div>`;
+
+    // 匹配示例
+    html += `
+      <div class="cs-topic-detail-section">
+        <div class="cs-topic-detail-section-title">${t('topicDetailExamples')}</div>`;
+    if (matches.length > 0) {
+      html += '<ul class="cs-topic-detail-example-list">';
+      matches.slice(0, 10).forEach(m => {
+        const time = new Date(m.timestamp).toLocaleTimeString(currentLang === 'zh' ? 'zh-CN' : 'en-US', { hour: '2-digit', minute: '2-digit' });
+        const excerpt = (m.text || '').slice(0, 80);
+        html += `<li class="cs-topic-detail-example-item">
+          <span class="cs-example-user">${m.username || '?'}</span>
+          <span class="cs-example-time">${time}</span>
+          <span class="cs-example-text">${excerpt}</span>
+        </li>`;
+      });
+      html += '</ul>';
+    } else {
+      html += `<div class="cs-topic-detail-none">${t('topicDetailNoExamples')}</div>`;
+    }
+    html += `</div>
+          </div>
+        </div>
+      </div>`;
+
+    // 插入和绑定
+    const overlay = document.createElement('div');
+    overlay.innerHTML = html;
+    this._el.appendChild(overlay.firstElementChild);
+
+    document.getElementById('cs-topic-detail-close')?.addEventListener('click', () => {
+      const ov = document.getElementById('cs-topic-detail-overlay');
+      if (ov) ov.remove();
+    });
+    document.getElementById('cs-topic-detail-overlay')?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) e.target.remove();
     });
   },
 
@@ -1375,6 +1520,7 @@ export const Panel = {
   },
 
   _runDiagnose() {
+    alert('诊断结果已输出到控制台（Console），请按 F12 查看。\n\nDiagnosis results are in the Console (F12).');
     const selectors = [
       '.reply-item', '.sub-reply-item', '.comment-item',
       '.comment-item-container', 'bili-comment-thread-renderer',
@@ -2724,6 +2870,117 @@ const PANEL_CSS = `
 
   /* AI test result */
   #cs-ai-test-result { font-size: 12px; }
+
+  /* ── Topic chip info button ──────────────────────────────────────────────── */
+  .cs-topic-info-btn {
+    background: none; border: none;
+    color: var(--cs-text-secondary); cursor: pointer;
+    font-size: 13px; padding: 0 2px; line-height: 1;
+    flex-shrink: 0; border-radius: 3px; opacity: 0.5;
+    transition: opacity 0.15s;
+  }
+  .cs-topic-info-btn:hover { opacity: 1; color: var(--cs-accent); }
+
+  /* ── Topic detail modal ──────────────────────────────────────────────────── */
+  .cs-topic-detail-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4); z-index: 2147483646;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .cs-topic-detail-panel {
+    background: var(--cs-bg, #fff); color: var(--cs-text, #333);
+    border-radius: 14px; width: 340px; max-height: 80vh;
+    display: flex; flex-direction: column;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.25);
+    overflow: hidden;
+  }
+  .cs-topic-detail-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--cs-divider, #eee);
+  }
+  .cs-topic-detail-title {
+    font-size: 16px; font-weight: 700; color: var(--cs-text, #333);
+  }
+  .cs-topic-detail-source {
+    font-size: 11px; color: var(--cs-text-secondary, #888);
+    background: var(--cs-bg-body, #f5f5f5); padding: 2px 8px;
+    border-radius: 8px;
+  }
+  .cs-topic-detail-close {
+    margin-left: auto; background: none; border: none;
+    font-size: 22px; color: var(--cs-text-secondary, #888);
+    cursor: pointer; padding: 0 4px; line-height: 1;
+  }
+  .cs-topic-detail-close:hover { color: var(--cs-text, #333); }
+  .cs-topic-detail-body {
+    overflow-y: auto; padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .cs-topic-detail-hdr {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .cs-topic-detail-status {
+    font-size: 12px; font-weight: 600;
+    color: var(--cs-text-secondary, #888);
+    padding: 3px 10px; border-radius: 10px;
+    background: var(--cs-bg-body, #f5f5f5);
+  }
+  .cs-topic-detail-status.cs-topic-status-on {
+    background: var(--cs-success-bg, #dcfce7);
+    color: var(--cs-success, #16a34a);
+  }
+  .cs-topic-detail-kw-count {
+    font-size: 12px; color: var(--cs-text-secondary, #888);
+  }
+  .cs-topic-detail-section-title {
+    font-size: 13px; font-weight: 600;
+    color: var(--cs-text, #333);
+    margin-bottom: 6px;
+  }
+  .cs-topic-detail-tags {
+    display: flex; flex-wrap: wrap; gap: 5px;
+  }
+  .cs-topic-detail-tag {
+    font-size: 12px; padding: 3px 10px;
+    border-radius: 10px; border: 1px solid var(--cs-border, #ddd);
+  }
+  .cs-tag-zh { background: var(--cs-bg-body, #f5f5f5); border-color: var(--cs-border, #ddd); }
+  .cs-tag-en { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+  .cs-topic-detail-none {
+    font-size: 12px; color: var(--cs-text-secondary, #888);
+    padding: 6px 0;
+  }
+  .cs-topic-detail-stat {
+    font-size: 20px; font-weight: 700; color: var(--cs-accent, #2563eb);
+  }
+  .cs-topic-detail-rule-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 4px;
+  }
+  .cs-topic-detail-rule-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 12px;
+    background: var(--cs-bg-body, #f5f5f5);
+    border-radius: 6px;
+  }
+  .cs-rule-trigger { font-weight: 600; color: var(--cs-text, #333); }
+  .cs-rule-type { color: var(--cs-text-secondary, #888); flex-shrink: 0; }
+  .cs-rule-conf { color: var(--cs-accent, #2563eb); font-weight: 600; }
+  .cs-rule-hits { color: var(--cs-text-secondary, #888); margin-left: auto; }
+  .cs-topic-detail-example-list {
+    list-style: none; padding: 0; margin: 0;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .cs-topic-detail-example-item {
+    display: flex; flex-wrap: wrap; gap: 4px 10px;
+    padding: 8px 10px; font-size: 12px;
+    background: var(--cs-bg-body, #f5f5f5);
+    border-radius: 6px; border-left: 3px solid var(--cs-accent, #2563eb);
+  }
+  .cs-example-user { font-weight: 600; color: var(--cs-accent, #2563eb); }
+  .cs-example-time { color: var(--cs-text-secondary, #888); font-size: 11px; }
+  .cs-example-text { width: 100%; color: var(--cs-text, #333); word-break: break-all; }
 `;
 
 function escapeHtml(str) {
