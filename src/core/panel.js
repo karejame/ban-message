@@ -748,7 +748,7 @@ export const Panel = {
             <input type="checkbox" class="cs-topic-check" data-topic="${topic.id}" ${topic.enabled ? 'checked' : ''}>
             <span class="cs-topic-chip-label">${label}</span>
           </label>
-          <button class="cs-topic-info-btn" data-topic="${topic.id}" title="${t('topicDetailClick')}">ℹ</button>
+          <button class="cs-topic-info-btn" data-topic="${topic.id}" title="${t('topicDetailClick')}">${t('topicDetailBtn')}</button>
           <button class="cs-topic-del-btn" data-topic="${topic.id}" data-name="${label}" title="${t('topicCustomDelete')}">×</button>
         </div>`;
     }).join('');
@@ -1520,7 +1520,7 @@ export const Panel = {
   },
 
   _runDiagnose() {
-    alert('诊断结果已输出到控制台（Console），请按 F12 查看。\n\nDiagnosis results are in the Console (F12).');
+    alert('诊断结果已输出到控制台，请按 F12 查看。\n\nDiagnosis results are in the Console (F12).');
     const selectors = [
       '.reply-item', '.sub-reply-item', '.comment-item',
       '.comment-item-container', 'bili-comment-thread-renderer',
@@ -2873,13 +2873,13 @@ const PANEL_CSS = `
 
   /* ── Topic chip info button ──────────────────────────────────────────────── */
   .cs-topic-info-btn {
-    background: none; border: none;
+    background: var(--cs-bg-body); border: 1px solid var(--cs-border);
     color: var(--cs-text-secondary); cursor: pointer;
-    font-size: 13px; padding: 0 2px; line-height: 1;
-    flex-shrink: 0; border-radius: 3px; opacity: 0.5;
-    transition: opacity 0.15s;
+    font-size: 12px; padding: 1px 8px; line-height: 1.6;
+    flex-shrink: 0; border-radius: 8px;
+    transition: all 0.15s;
   }
-  .cs-topic-info-btn:hover { opacity: 1; color: var(--cs-accent); }
+  .cs-topic-info-btn:hover { background: var(--cs-accent); color: #fff; border-color: var(--cs-accent); }
 
   /* ── Topic detail modal ──────────────────────────────────────────────────── */
   .cs-topic-detail-overlay {
