@@ -1,9 +1,12 @@
-import { Detector, Verdict } from './detector.js';
+import { Detector, Verdict, RiskLevel, shouldAct } from './detector.js';
 import { AIAnalyzer } from './ai.js';
 import { RuleLearner } from './rule-learner.js';
 import { RuleManager } from './rule-manager.js';
 import { Blocker } from './blocker.js';
 import { Evidence } from './evidence.js';
+import { TopicFilter } from './topic-filter.js';
+import { ContextWindow } from './context-window.js';
+import { MemoryManager } from './memory.js';
 import { t } from './i18n.js';
 import { emit } from './events.js';
 
@@ -17,6 +20,9 @@ export class Scanner {
     this.ruleManager = new RuleManager();
     this.blocker  = new Blocker(platform, config);
     this.evidence = new Evidence(config);
+    this.topicFilter = new TopicFilter();
+    this.contextWindow = new ContextWindow({ windowMs: 60000 });
+    this.memory = new MemoryManager();
     this.observer = null;
     this._seen = new WeakSet();
     this._pendingNodes = [];
@@ -40,22 +46,29 @@ export class Scanner {
       filtered: 0,
       suspicious: 0,
       spamBlocked: 0,
+      aiAnalyzed: 0,
       lastScanTime: null,
       activeRules: 0,
       hardRules: 0,
       softRules: 0,
       regexRules: 0,
       customRules: 0,
+      learnedRules: 0,
+      contextRules: 0,
       platform: platform.name,
       observerActive: false,
       waitingForInit: false,
     };
   }
 
-  /** 初始化远程词库 */
+  /** 初始化远程词库 + 记忆清理 */
   async initRules() {
     await this.ruleManager.init();
     this.ruleManager.mergeToDetector(this.detector);
+    // 同步已学习规则到 detector
+    this.ruleLearner.syncToDetector(this.detector);
+    // 启动时清理过期记忆
+    this.memory.prune();
   }
 
   async start() {
@@ -130,11 +143,13 @@ export class Scanner {
   }
 
   _updateRuleCounts() {
-    this.stats.hardRules   = this.detector.hardKeywords.size;
-    this.stats.softRules   = this.detector.softKeywords.size;
-    this.stats.regexRules  = this.detector.regexPatterns.length;
-    this.stats.customRules = (this.config.customKeywords || []).length;
-    this.stats.activeRules = this.stats.hardRules + this.stats.softRules + this.stats.regexRules + this.stats.customRules;
+    this.stats.hardRules    = this.detector.hardKeywords.size;
+    this.stats.softRules    = this.detector.softKeywords.size;
+    this.stats.regexRules   = this.detector.regexPatterns.length;
+    this.stats.customRules  = (this.config.customKeywords || []).length;
+    this.stats.learnedRules = this.ruleLearner.getLearnedKeywords().length;
+    this.stats.contextRules = this.detector.contextRuleEngine.getAllRules().length;
+    this.stats.activeRules  = this.stats.hardRules + this.stats.softRules + this.stats.regexRules + this.stats.customRules;
   }
 
   _getStatsPayload() {
@@ -143,16 +158,22 @@ export class Scanner {
       filtered:        this.stats.filtered,
       suspicious:      this.stats.suspicious,
       spamBlocked:     this.stats.spamBlocked,
+      aiAnalyzed:      this.stats.aiAnalyzed,
       lastScanTime:    this.stats.lastScanTime,
       activeRules:     this.stats.activeRules,
       hardRules:       this.stats.hardRules,
       softRules:       this.stats.softRules,
       regexRules:      this.stats.regexRules,
       customRules:     this.stats.customRules,
+      learnedRules:    this.stats.learnedRules,
+      contextRules:    this.stats.contextRules,
       platform:        this.stats.platform,
       observerActive:  this.stats.observerActive,
       waitingForInit:  this.stats.waitingForInit,
       enabled:         this.config.enabled,
+      aiStatus:        this.aiAnalyzer.getStatus(),
+      memoryStats:     this.memory.getStats(),
+      contextWindowStats: this.contextWindow.getStats(),
     };
   }
 
@@ -623,6 +644,7 @@ export class Scanner {
     }
 
     const context = this._buildContext(el, username);
+    context._element = el; // 传给 context-window
 
     const result = this.detector.analyze(text, context, this.aiAnalyzer, (aiResult) => {
       if (!aiResult) return;
@@ -634,17 +656,39 @@ export class Scanner {
         };
         this.ruleLearner.learn(aiResult, text, learnContext);
         this.ruleLearner.syncToDetector(this.detector);
+
+        // 写入记忆（中期 pattern）
+        if (aiResult.patterns && aiResult.patterns.length > 0) {
+          this.memory.write({
+            type: 'pattern',
+            key: aiResult.patterns[0],
+            value: { intent: aiResult.intent, verdict: aiResult.verdict },
+            confidence: aiResult.confidence,
+            source: 'ai_learned',
+          });
+        }
       }
 
-      if (aiResult.verdict === Verdict.TOXIC) {
+      // AI 判定结果的风险等级处理
+      if (aiResult.verdict === Verdict.TOXIC && shouldAct(aiResult.riskLevel || 'high', this.config.sensitivity)) {
         this._handleToxic(el, text, username, aiResult, contentType);
       }
+    }, {
+      topicFilter: this.topicFilter,
+      contextWindow: this.contextWindow,
     });
 
-    if (result.verdict === Verdict.TOXIC) {
-      console.log(`[CyberShield] TOXIC @${username || '?'} [${contentType}]: "${text.slice(0, 60)}"`);
+    if (result.verdict === Verdict.TOXIC && shouldAct(result.riskLevel || 'high', this.config.sensitivity)) {
+      console.log(`[CyberShield] TOXIC @${username || '?'} [${contentType}] risk=${result.riskLevel}: "${text.slice(0, 60)}"`);
       this._handleToxic(el, text, username, result, contentType);
-    } else if (result.verdict === Verdict.SUSPICIOUS) {
+
+      // 规则命中计数
+      if (result.matched && result.matched.length > 0) {
+        for (const m of result.matched) {
+          this.ruleLearner.recordHit(m);
+        }
+      }
+    } else if (result.verdict === Verdict.SUSPICIOUS && shouldAct(result.riskLevel || 'medium', this.config.sensitivity)) {
       this._handleSuspicious(el, result);
     }
 
@@ -866,8 +910,10 @@ export class Scanner {
     const targetEl = this._findTextElement(el, contentType) || el;
     targetEl.style.border = '1px dashed rgba(255, 165, 0, 0.4)';
     targetEl.dataset.csVerdict = 'suspicious';
-    targetEl.title = `[CyberShield] Suspicious: ${result.reason}`;
-    console.log(`[CyberShield] SUSPICIOUS: "${result.reason}"`);
+    targetEl.dataset.csRiskLevel = result.riskLevel || 'medium';
+    targetEl.dataset.csReason = result.reason;
+    targetEl.title = `[CyberShield] ${result.riskLevel || 'medium'}: ${result.reason}`;
+    console.log(`[CyberShield] SUSPICIOUS (${result.riskLevel || 'medium'}): "${result.reason}"`);
   }
 
   /**
@@ -1295,6 +1341,94 @@ export class Scanner {
     const results = [];
     this._deepQueryAllRecursive(shadowRoot, selector, results);
     return results;
+  }
+
+  // ── AI 语义模块交互接口 ──────────────────────────────────────────────────
+
+  /**
+   * 用户标记误判（记忆污染恢复 A5 / A9）
+   * @param {number} evidenceIndex  取证记录索引
+   * @returns {{ success: boolean, message: string }}
+   */
+  markFalsePositive(evidenceIndex) {
+    const logs = this.evidence.getAll();
+    const entry = logs[evidenceIndex];
+    if (!entry) return { success: false, message: 'Record not found' };
+
+    // 1. 从取证记录中获取匹配的触发词
+    const matched = entry.result?.matched || [];
+    let deleted = false;
+
+    for (const trigger of matched) {
+      // 2. 通知 rule-learner 降低置信度
+      const lrResult = this.ruleLearner.recordCorrection(trigger);
+      if (lrResult.deleted) deleted = true;
+
+      // 3. 通知 context-rule-engine
+      const crResult = this.detector.contextRuleEngine.recordCorrection(trigger);
+      if (crResult.deleted) deleted = true;
+    }
+
+    // 4. 更新取证记录标记
+    entry.falsePositive = true;
+    this.evidence._save(logs);
+
+    // 5. 重新同步规则到 detector
+    this.ruleLearner.syncToDetector(this.detector);
+    this._updateRuleCounts();
+    emit('stats:update', this._getStatsPayload());
+
+    return {
+      success: true,
+      message: deleted ? 'Rule deleted (confidence too low)' : 'Confidence reduced',
+      deletedRules: deleted,
+    };
+  }
+
+  /**
+   * 获取话题过滤器状态（供面板使用）
+   */
+  getTopicFilter() {
+    return this.topicFilter;
+  }
+
+  /**
+   * 获取 AI 分析器状态（供面板使用）
+   */
+  getAIStatus() {
+    return this.aiAnalyzer.getStatus();
+  }
+
+  /**
+   * 更新 AI 配置（面板实时修改时调用）
+   */
+  updateAIConfig(newConfig) {
+    this.aiAnalyzer.updateConfig(newConfig);
+  }
+
+  /**
+   * 获取记忆管理器统计
+   */
+  getMemoryStats() {
+    return this.memory.getStats();
+  }
+
+  /**
+   * 获取已学习规则详情（供面板展示）
+   */
+  getLearnedRules() {
+    return this.ruleLearner.getAllRulesDetailed();
+  }
+
+  /**
+   * 手动触发远程词库更新
+   */
+  async refreshRemoteRules() {
+    await this.ruleManager.fetchRemote();
+    this.ruleManager.mergeToDetector(this.detector);
+    this.ruleLearner.syncToDetector(this.detector);
+    this._updateRuleCounts();
+    emit('stats:update', this._getStatsPayload());
   }
 }
 

@@ -1,41 +1,51 @@
 /**
- * ai.js — Layer 3: Claude AI 检测模块
+ * ai.js — Layer 3: AI 语义检测模块（升级版）
  *
- * 职责：封装 Claude API 调用，提供统一的 async analyze() 接口。
- * 后续扩展：批处理队列、每日调用上限、规则晋升触发。
+ * 职责：
+ *   - 封装多 Provider AI API 调用（Claude / OpenAI / 自定义）
+ *   - 三档 AI 模式：off / eco（默认）/ full
+ *   - 批处理队列 + 每日调用上限 + 自动降级
+ *   - 升级输出契约：intent + learned_rule
+ *   - 话题过滤集成（路由条件判断）
+ *   - 无 API Key 时优雅降级（A8）
  */
 
-// ─── 默认 Prompt 模板 ──────────────────────────────────────────────────────────
+import { createProvider } from './ai-providers/index.js';
 
-const DEFAULT_SYSTEM_PROMPT = `你正在检测中文网络暴力内容。特别注意以下绕过手法：
-1. 谐音字替换（如用"筹集"代替"臭鸡"）
-2. 拼音缩写（如 sb、nmsl）
-3. 数字谐音
-4. 故意错别字
-5. 词义污化（普通词被赋予贬义含义）
+// ─── AI 模式定义 ──────────────────────────────────────────────────────────────
 
-判断标准是说话者的意图，而非字面用词。
-同一词汇在不同语境下可能有完全不同的判定。
-
-请输出严格的 JSON 格式：
-{
-  "verdict": "toxic" | "suspicious" | "safe",
-  "confidence": 0.0-1.0,
-  "reason": "一句简短的原因说明",
-  "patterns": ["提取的触发模式，便于本地规则学习"]
-}`;
+export const AIMode = {
+  OFF:  'off',   // 不调用 AI
+  ECO:  'eco',   // 仅 L1 miss + L2 suspicious 才触发，批量打包
+  FULL: 'full',  // L1 miss 全部送 AI
+};
 
 // ─── 批处理参数 ────────────────────────────────────────────────────────────────
 
 const BATCH_SIZE = 10;
 const BATCH_TIMEOUT = 5000; // 5s
+const DEFAULT_DAILY_LIMIT = 30;
 
 export class AIAnalyzer {
+  /**
+   * @param {object} config
+   * @param {string} [config.apiKey]       API 密钥
+   * @param {string} [config.aiProvider]   'claude' | 'openai' | 自定义
+   * @param {string} [config.aiModel]      模型覆盖
+   * @param {string} [config.aiEndpoint]   自定义端点（OpenAI 兼容）
+   * @param {string} [config.aiMode]       'off' | 'eco' | 'full'
+   * @param {number} [config.aiDailyLimit] 每日调用上限
+   * @param {boolean} [config.aiEnabled]   全局 AI 开关
+   */
   constructor(config) {
     this.config = config;
     this.dailyCount = 0;
     this.lastResetDate = null;
     this._loadDailyCount();
+
+    // 创建 Provider 实例
+    this.provider = null;
+    this._initProvider();
 
     // 批处理队列
     this._queue = [];
@@ -44,17 +54,81 @@ export class AIAnalyzer {
     this._queueIdCounter = 0;
   }
 
+  /** 初始化/重建 Provider */
+  _initProvider() {
+    if (this.config.apiKey) {
+      this.provider = createProvider(this.config);
+    } else {
+      this.provider = null;
+    }
+  }
+
+  /**
+   * 更新配置（面板实时修改时调用）
+   */
+  updateConfig(newConfig) {
+    Object.assign(this.config, newConfig);
+    this._initProvider();
+  }
+
+  // ─── AI 模式与路由 ──────────────────────────────────────────────────────────
+
+  /** 获取当前 AI 模式 */
+  getMode() {
+    if (!this.config.aiEnabled) return AIMode.OFF;
+    return this.config.aiMode || AIMode.ECO;
+  }
+
+  /**
+   * 判断是否应该调用 AI（路由条件 A3）
+   *
+   * 进入 AI 的条件全部满足才触发：
+   * 1. AI 模式不是 off
+   * 2. Provider 可用（有 API Key）
+   * 3. 今日调用未达上限
+   * 4. Layer 1 未命中
+   * 5. eco 模式下：Layer 2 必须为 suspicious
+   *    full 模式下：Layer 1 miss 即可
+   * 6. topic-filter 确认涉及用户关心的话题（可选，由调用方传入）
+   *
+   * @param {object} layerResult  Layer 1/2 的结果
+   * @param {boolean} [involvesTopic]  是否涉及用户关心话题
+   * @returns {boolean}
+   */
+  shouldAnalyze(layerResult, involvesTopic = true) {
+    const mode = this.getMode();
+    if (mode === AIMode.OFF) return false;
+    if (!this.provider) return false;
+    if (!this._checkDailyLimit()) return false;
+
+    // Layer 1 命中 → 不需要 AI
+    if (layerResult.layer === 1 && layerResult.verdict === 'toxic') return false;
+
+    if (mode === AIMode.ECO) {
+      // eco: 仅 L2 suspicious 触发
+      return layerResult.verdict === 'suspicious';
+    }
+
+    if (mode === AIMode.FULL) {
+      // full: L1 miss 全部送 AI（但 safe 的 L2 可以跳过）
+      return layerResult.verdict !== 'toxic';
+    }
+
+    return false;
+  }
+
+  // ─── 分析入口 ──────────────────────────────────────────────────────────────
+
   /**
    * AI 分析入口 — 支持批处理合并
    * @param {string} text
    * @param {object} context  { platform, isReply, mentionsUser, username }
-   * @returns {Promise<object|null>}  { verdict, confidence, layer:3, reason, patterns }
+   * @returns {Promise<object|null>}  升级后的 AIResult
    */
   async analyze(text, context = {}) {
-    if (!this.config.apiKey) return null;
+    if (!this.provider) return null;
     if (!this._checkDailyLimit()) return null;
 
-    // 通过 Promise 入队，攒够批量或超时后统一发送
     return new Promise((resolve) => {
       const id = ++this._queueIdCounter;
       this._queueResolvers.set(id, resolve);
@@ -68,6 +142,32 @@ export class AIAnalyzer {
     });
   }
 
+  /**
+   * 单条即时分析（不走批处理队列）
+   * @param {string} text
+   * @param {object} context
+   * @returns {Promise<object|null>}
+   */
+  async analyzeImmediate(text, context = {}) {
+    if (!this.provider) return null;
+    if (!this._checkDailyLimit()) return null;
+
+    try {
+      const result = await this.provider.analyzeSingle(text, context);
+      if (result) {
+        this.dailyCount++;
+        this._saveDailyCount();
+        result.layer = 3;
+      }
+      return result;
+    } catch (err) {
+      console.warn('[CyberShield] AI single analysis failed:', err);
+      return null;
+    }
+  }
+
+  // ─── 每日限额 ──────────────────────────────────────────────────────────────
+
   /** 获取今日已用次数 */
   getTodayUsage() {
     return this.dailyCount;
@@ -75,10 +175,16 @@ export class AIAnalyzer {
 
   /** 获取每日上限 */
   getDailyLimit() {
-    return this.config.aiDailyLimit || 30;
+    return this.config.aiDailyLimit || DEFAULT_DAILY_LIMIT;
   }
 
-  /** 检查是否达到每日上限 */
+  /** 是否已达到每日上限 */
+  isLimitReached() {
+    this._checkDailyLimit(); // 刷新日期
+    return this.dailyCount >= this.getDailyLimit();
+  }
+
+  /** 检查是否达到每日上限，未达则返回 true */
   _checkDailyLimit() {
     const today = new Date().toDateString();
     if (this.lastResetDate !== today) {
@@ -106,7 +212,9 @@ export class AIAnalyzer {
     } catch (e) { /* silent */ }
   }
 
-  /** 刷新批处理队列，攒够一批后发送 */
+  // ─── 批处理引擎 ────────────────────────────────────────────────────────────
+
+  /** 刷新批处理队列 */
   _flushBatch() {
     if (this._queueTimer) {
       clearTimeout(this._queueTimer);
@@ -116,7 +224,8 @@ export class AIAnalyzer {
     const batch = this._queue.splice(0, BATCH_SIZE);
     if (batch.length === 0) return;
 
-    this._callBatchAPI(batch).then(results => {
+    // eco 模式使用批量调用
+    this._callBatch(batch).then(results => {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const resolve = this._queueResolvers.get(item.id);
@@ -127,6 +236,7 @@ export class AIAnalyzer {
       }
     }).catch(err => {
       console.warn('[CyberShield] Batch AI failed, falling back to single:', err);
+      // 批量失败 → 逐条回退
       for (const item of batch) {
         const resolve = this._queueResolvers.get(item.id);
         if (resolve) {
@@ -136,149 +246,58 @@ export class AIAnalyzer {
     });
   }
 
-  /** 批量 API 调用 */
-  async _callBatchAPI(batch) {
-    const batchText = batch.map((item, i) =>
-      `[${i + 1}] """${item.text}""" (platform: ${item.context.platform || 'unknown'})`
-    ).join('\n\n');
-
-    const prompt = `Analyze each of the following ${batch.length} messages for toxicity. Respond with a JSON array where each element corresponds to the message at the same index.
-
-Messages:
-${batchText}
-
-Respond with ONLY valid JSON array:
-[
-  { "verdict": "toxic"|"suspicious"|"safe", "confidence": 0.0-1.0, "reason": "...", "patterns": ["..."] }
-]`;
-
-    const rawData = await this._gmFetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        system: DEFAULT_SYSTEM_PROMPT,
-        max_tokens: 200 * batch.length,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-
-    const raw = rawData.content?.[0]?.text || '[]';
-    const results = JSON.parse(raw.replace(/```json|```/g, '').trim());
-
-    if (!Array.isArray(results)) return batch.map(() => null);
+  /** 批量调用 Provider */
+  async _callBatch(batch) {
+    const items = batch.map(b => ({ text: b.text, context: b.context }));
+    const results = await this.provider.analyzeBatch(items);
 
     return results.map(r => {
       if (!r) return null;
       this.dailyCount++;
       this._saveDailyCount();
-      return {
-        verdict:    r.verdict     || 'safe',
-        confidence: r.confidence  || 0.5,
-        layer:      3,
-        reason:     r.reason      || 'AI analysis',
-        patterns:   r.patterns    || [],
-      };
+      r.layer = 3;
+      return r;
     });
   }
 
-  /** 单条回退（批量失败时降级） */
+  /** 单条回退 */
   async _singleFallback(item, resolve) {
-    const prompt = this._buildPrompt(item.text, item.context);
     try {
-      const rawData = await this._gmFetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.config.apiKey,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          system: DEFAULT_SYSTEM_PROMPT,
-          max_tokens: 200,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-      });
-      const raw = rawData.content?.[0]?.text || '{}';
-      const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
-      this.dailyCount++;
-      this._saveDailyCount();
-      resolve({
-        verdict:    result.verdict     || 'safe',
-        confidence: result.confidence  || 0.5,
-        layer:      3,
-        reason:     result.reason      || 'AI analysis',
-        patterns:   result.patterns    || [],
-      });
+      const result = await this.provider.analyzeSingle(item.text, item.context);
+      if (result) {
+        this.dailyCount++;
+        this._saveDailyCount();
+        result.layer = 3;
+      }
+      resolve(result);
     } catch (err) {
       resolve(null);
     }
   }
 
-  _buildPrompt(text, context) {
-    return `Text: """${text}"""
-Context: Platform=${context.platform || 'unknown'}, Is a direct reply=${!!context.isReply}
+  // ─── 状态信息（供面板展示）──────────────────────────────────────────────────
 
-Respond with ONLY valid JSON:
-{
-  "verdict": "toxic" | "suspicious" | "safe",
-  "confidence": 0.0-1.0,
-  "reason": "one sentence explanation",
-  "patterns": ["list of trigger patterns"]
-}`;
-  }
-
-  async _callAPI(prompt) {
-    const data = await this._gmFetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        system: DEFAULT_SYSTEM_PROMPT,
-        max_tokens: 200,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    });
-
-    const raw = data.content?.[0]?.text || '{}';
-    const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
-
+  /** 获取完整状态 */
+  getStatus() {
     return {
-      verdict:    result.verdict     || 'safe',
-      confidence: result.confidence  || 0.5,
-      layer:      3,
-      reason:     result.reason      || 'AI analysis',
-      patterns:   result.patterns    || [],
+      mode: this.getMode(),
+      provider: this.provider?.name || 'none',
+      model: this.provider?.model || 'none',
+      dailyUsed: this.dailyCount,
+      dailyLimit: this.getDailyLimit(),
+      isLimitReached: this.isLimitReached(),
+      hasApiKey: !!this.config.apiKey,
+      queueSize: this._queue.length,
     };
   }
 
-  _gmFetch(url, options = {}) {
-    return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
-        url,
-        method: options.method || 'GET',
-        headers: options.headers || {},
-        data: options.body,
-        responseType: 'json',
-        onload: (res) => {
-          if (res.status >= 200 && res.status < 300) {
-            resolve(res.response);
-          } else {
-            reject(new Error(`HTTP ${res.status}: ${res.responseText?.slice(0, 200)}`));
-          }
-        },
-        onerror: reject,
-        ontimeout: () => reject(new Error('Request timed out')),
-      });
-    });
+  /** 验证当前 API Key 是否有效 */
+  async validateKey() {
+    if (!this.provider) return false;
+    try {
+      return await this.provider.validateKey();
+    } catch (e) {
+      return false;
+    }
   }
 }

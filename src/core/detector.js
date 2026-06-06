@@ -1,14 +1,22 @@
 /**
- * detector.js — Three-Layer Toxicity Detection Engine
+ * detector.js — Three-Layer Toxicity Detection Engine (升级版)
  *
  * Layer 1: Keyword Rules      (sync,  ~0ms)   — hard pattern match + variant/fuzzy matching
  * Layer 2: Behavioral Rules   (sync,  ~1ms)   — structural/contextual signals
- * Layer 3: Claude AI          (async, ~500ms) — ambiguous gray-zone content
+ * Layer 3: AI Semantic        (async, ~500ms) — ambiguous gray-zone content
+ *
+ * 新增：
+ *   - 集成 text-normalizer.js 归一化流水线
+ *   - 四级风险等级：SAFE / LOW / MEDIUM / HIGH
+ *   - 集成 context-window 短时上下文
+ *   - 集成 topic-filter 话题过滤
+ *   - 增强路由逻辑（分层路由 Wiki 11）
  */
 
 import enPatterns from '../data/en-patterns.json';
 import zhPatterns from '../data/zh-patterns.json';
 import { ContextRuleEngine } from './context-rule.js';
+import { normalizeText, normalizeDeep } from './text-normalizer.js';
 
 // ─── Result schema ────────────────────────────────────────────────────────────
 //
@@ -16,8 +24,11 @@ import { ContextRuleEngine } from './context-rule.js';
 //    verdict:    'toxic' | 'suspicious' | 'safe',
 //    confidence: 0.0–1.0,
 //    layer:      1 | 2 | 3,
+//    riskLevel:  'safe' | 'low' | 'medium' | 'high',
 //    reason:     string,          // human-readable explanation
 //    matched:    string[],        // matched keywords or patterns
+//    intent:     string | null,   // 话题类别 (from AI layer)
+//    explainChain: object[],      // 命中链路（可解释性 A9）
 //  }
 
 export const Verdict = {
@@ -25,6 +36,52 @@ export const Verdict = {
   SUSPICIOUS: 'suspicious',
   SAFE:       'safe',
 };
+
+// ─── 四级风险等级 (A6) ────────────────────────────────────────────────────────
+
+export const RiskLevel = {
+  SAFE:   'safe',
+  LOW:    'low',
+  MEDIUM: 'medium',
+  HIGH:   'high',
+};
+
+/**
+ * 将 verdict + confidence 映射为风险等级
+ * 灵敏度设置会影响映射阈值
+ */
+function verdictToRiskLevel(verdict, confidence, sensitivity) {
+  if (verdict === Verdict.TOXIC) {
+    return confidence >= 0.8 ? RiskLevel.HIGH : RiskLevel.MEDIUM;
+  }
+  if (verdict === Verdict.SUSPICIOUS) {
+    return confidence >= 0.5 ? RiskLevel.MEDIUM : RiskLevel.LOW;
+  }
+  return RiskLevel.SAFE;
+}
+
+/**
+ * 灵敏度 → 最低处理风险等级
+ *   低灵敏度：只处理 HIGH
+ *   中灵敏度（默认）：处理 MEDIUM 以上
+ *   高灵敏度：处理 LOW 以上
+ */
+export function getMinRiskLevel(sensitivity) {
+  switch (sensitivity) {
+    case 'low':    return RiskLevel.HIGH;
+    case 'high':   return RiskLevel.LOW;
+    default:       return RiskLevel.MEDIUM;
+  }
+}
+
+/**
+ * 判断风险等级是否达到处理阈值
+ */
+export function shouldAct(riskLevel, sensitivity) {
+  const minLevel = getMinRiskLevel(sensitivity);
+  const order = [RiskLevel.SAFE, RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH];
+  return order.indexOf(riskLevel) >= order.indexOf(minLevel);
+}
 
 // ─── Sensitivity thresholds ───────────────────────────────────────────────────
 
@@ -59,16 +116,13 @@ export class Detector {
       ...(zhPatterns.regex_patterns || []).map(p => new RegExp(p)),
     ];
 
-    // ── 变体映射（用于谐音/拼音/符号绕过检测） ──────────────────────────────
     this.variantMap = [
       ...(enPatterns.variant_map || []),
       ...(zhPatterns.variant_map || []),
     ];
 
-    // ── 拼音缩写映射（中文拼音首字母缩写还原） ──────────────────────────────
     this.pinyinMap = zhPatterns.pinyin_map || {};
 
-    // ── 添加用户自定义关键词 ──────────────────────────────────────────────────
     this._addCustomKeywords();
   }
 
@@ -76,16 +130,13 @@ export class Detector {
     this._customKeywordKeys = new Set();
     const customs = this.config.customKeywords || [];
     for (const entry of customs) {
-      // 主词作为 hard keyword
       if (entry.keyword) {
         const kw = entry.keyword.toLowerCase();
-        // 只追踪非内置的关键词，避免误删内置规则
         if (!this.hardKeywords.has(kw)) {
           this._customKeywordKeys.add(kw);
         }
         this.hardKeywords.add(kw);
       }
-      // 别名/联想词也加入
       if (entry.aliases && entry.aliases.length > 0) {
         for (const alias of entry.aliases) {
           const a = alias.toLowerCase();
@@ -98,25 +149,15 @@ export class Detector {
     }
   }
 
-  /**
-   * 重新加载自定义关键词（无需重建 Detector）
-   * 删除旧的自定义关键词，添加新的，保留内置/远程/已学习规则
-   */
   reloadCustomKeywords() {
-    // 1. 移除之前添加的自定义关键词
     if (this._customKeywordKeys) {
       for (const kw of this._customKeywordKeys) {
         this.hardKeywords.delete(kw);
       }
     }
-    // 2. 重新添加
     this._addCustomKeywords();
   }
 
-  /**
-   * 导出所有规则（内置 + 自定义）用于可视化展示
-   * @returns {Object} { hardKeywords, softKeywords, regexPatterns, customKeywords }
-   */
   getAllRules() {
     return {
       hardKeywords: [...this.hardKeywords],
@@ -129,36 +170,116 @@ export class Detector {
   }
 
   /**
-   * 主入口 — 运行所有检测层。
-   * 同步返回结果对象（AI层结果通过回调添加）。
+   * 主入口 — 运行检测流水线。
    *
-   * @param {string}   text
-   * @param {object}   context   { username, platform, isReply, mentionsUser }
-   * @param {object}   aiAnalyzer   AIAnalyzer 实例（用于 Layer 3）
-   * @param {Function} onAIResult   Called with final AI result if layer 3 runs
+   * @param {string}   text          原始文本
+   * @param {object}   context       { username, platform, isReply, mentionsUser }
+   * @param {object}   aiAnalyzer    AIAnalyzer 实例
+   * @param {Function} onAIResult    AI 结果回调
+   * @param {object}   [extras]      额外模块
+   * @param {object}   [extras.topicFilter]     TopicFilter 实例
+   * @param {object}   [extras.contextWindow]  ContextWindow 实例
+   * @returns {object}  同步结果（含 riskLevel）
    */
-  analyze(text, context = {}, aiAnalyzer = null, onAIResult = null) {
-    const normalized = this._normalize(text);
+  analyze(text, context = {}, aiAnalyzer = null, onAIResult = null, extras = {}) {
+    const explainChain = [];
 
-    // Layer 1: 关键词 + 变体匹配
-    const l1 = this._layerOneKeywords(normalized);
-    if (l1.verdict === Verdict.TOXIC) return l1;
+    // ── Step 1: 归一化（使用 text-normalizer）──────────────────────────────
+    const normalized = normalizeText(text, { preserveNumbers: true });
+    const deepNormalized = normalizeDeep(text, { preserveNumbers: true });
 
-    // Layer 2: 行为模式
-    const l2 = this._layerTwoBehavior(normalized, context);
-    if (l2.verdict === Verdict.TOXIC) return l2;
-
-    // Layer 3 — async, only if enabled and text is ambiguous
-    if (this.config.aiEnabled && aiAnalyzer && l2.verdict === Verdict.SUSPICIOUS && onAIResult) {
-      aiAnalyzer.analyze(text, context).then(onAIResult);
+    // ── Step 2: Layer 1 — 关键词 + 变体匹配 ──────────────────────────────
+    const l1 = this._layerOneKeywords(normalized, deepNormalized);
+    if (l1.verdict === Verdict.TOXIC) {
+      explainChain.push({ layer: 1, verdict: l1.verdict, matched: l1.matched, reason: l1.reason });
+      l1.riskLevel = verdictToRiskLevel(l1.verdict, l1.confidence, this.config.sensitivity);
+      l1.explainChain = explainChain;
+      l1.intent = null;
+      return l1;
     }
 
-    return l2.verdict === Verdict.SUSPICIOUS ? l2 : { verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No signals', matched: [] };
+    // ── Step 3: Layer 2 — 行为信号 ──────────────────────────────────────
+    const l2 = this._layerTwoBehavior(normalized, context);
+    if (l2.verdict === Verdict.TOXIC) {
+      explainChain.push({ layer: 2, verdict: l2.verdict, matched: l2.matched, reason: l2.reason });
+      l2.riskLevel = verdictToRiskLevel(l2.verdict, l2.confidence, this.config.sensitivity);
+      l2.explainChain = explainChain;
+      l2.intent = null;
+      return l2;
+    }
+
+    // ── Step 4: 短时上下文窗口组合检测 ──────────────────────────────────
+    if (extras.contextWindow && context.username) {
+      const syncResult = l2.verdict !== Verdict.SAFE ? l2 : l1;
+      extras.contextWindow.addMessage(context.username, text, syncResult, context._element);
+
+      if (extras.contextWindow.shouldCombine(context.username)) {
+        const combined = extras.contextWindow.getCombined(context.username);
+        if (combined) {
+          const combinedNormalized = normalizeText(combined.combinedText, { preserveNumbers: true });
+          const combinedL1 = this._layerOneKeywords(combinedNormalized, normalizeDeep(combined.combinedText, { preserveNumbers: true }));
+          if (combinedL1.verdict === Verdict.TOXIC) {
+            explainChain.push({
+              layer: 'context_window',
+              verdict: combinedL1.verdict,
+              matched: combinedL1.matched,
+              reason: 'Combined message analysis detected toxicity',
+              messageCount: combined.messages.length,
+            });
+            combinedL1.layer = 2;
+            combinedL1.riskLevel = verdictToRiskLevel(combinedL1.verdict, combinedL1.confidence, this.config.sensitivity);
+            combinedL1.explainChain = explainChain;
+            combinedL1.intent = null;
+            return combinedL1;
+          }
+        }
+      }
+    }
+
+    // ── Step 5: Layer 3 — AI 语义分析（异步） ─────────────────────────
+    if (aiAnalyzer && onAIResult && this.config.aiEnabled) {
+      const currentResult = l2.verdict === Verdict.SUSPICIOUS ? l2 : l1;
+      const involvesTopic = extras.topicFilter
+        ? extras.topicFilter.involvesUserTopic(normalized)
+        : true;
+
+      if (aiAnalyzer.shouldAnalyze(currentResult, involvesTopic)) {
+        explainChain.push({ layer: 3, action: 'queued_for_ai', reason: 'Ambiguous content sent to AI' });
+
+        // 附加话题信息到 context
+        const aiContext = {
+          ...context,
+          topics: extras.topicFilter ? extras.topicFilter.detectTopics(normalized) : [],
+        };
+
+        aiAnalyzer.analyze(text, aiContext).then(aiResult => {
+          if (aiResult) {
+            aiResult.riskLevel = verdictToRiskLevel(
+              aiResult.verdict, aiResult.confidence, this.config.sensitivity
+            );
+            aiResult.explainChain = [
+              ...explainChain,
+              { layer: 3, verdict: aiResult.verdict, reason: aiResult.reason, intent: aiResult.intent },
+            ];
+          }
+          onAIResult(aiResult);
+        });
+      }
+    }
+
+    // 返回同步结果
+    const finalResult = l2.verdict === Verdict.SUSPICIOUS ? l2 : {
+      verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No signals', matched: [],
+    };
+    finalResult.riskLevel = verdictToRiskLevel(finalResult.verdict, finalResult.confidence, this.config.sensitivity);
+    finalResult.explainChain = explainChain;
+    finalResult.intent = null;
+    return finalResult;
   }
 
   // ── Layer 1: Keyword Matching + Variant/Fuzzy Matching ─────────────────────
 
-  _layerOneKeywords(text) {
+  _layerOneKeywords(text, deepText) {
     const matched = [];
 
     // Hard keywords: instant toxic verdict
@@ -169,60 +290,58 @@ export class Detector {
       return { verdict: Verdict.TOXIC, confidence: 0.95, layer: 1, reason: 'Hard keyword match', matched };
     }
 
-    // ── 变体/谐音检测：先对文本做变体还原，再匹配关键词 ────────────────────
-    const variantNormalized = this._normalizeForVariants(text);
+    // ── 深度归一化后的匹配（变体/谐音） ──────────────────────────────
     const variantMatched = [];
     for (const kw of this.hardKeywords) {
-      if (variantNormalized.includes(kw)) variantMatched.push(kw);
+      if (deepText.includes(kw)) variantMatched.push(kw);
     }
     if (variantMatched.length > 0) {
-      return { verdict: Verdict.TOXIC, confidence: 0.90, layer: 1, reason: 'Variant keyword match', matched: variantMatched };
+      return { verdict: Verdict.TOXIC, confidence: 0.90, layer: 1, reason: 'Variant keyword match (normalized)', matched: variantMatched };
+    }
+
+    // ── 拼音缩写还原（在 deepText 基础上额外检测） ──────────────────
+    const pinyinNormalized = this._normalizePinyin(text);
+    if (pinyinNormalized !== text) {
+      const pinyinMatched = [];
+      for (const kw of this.hardKeywords) {
+        if (pinyinNormalized.includes(kw)) pinyinMatched.push(kw);
+      }
+      if (pinyinMatched.length > 0) {
+        return { verdict: Verdict.TOXIC, confidence: 0.85, layer: 1, reason: 'Pinyin variant match', matched: pinyinMatched };
+      }
     }
 
     // Regex patterns
     const regexMatched = [];
     for (const rx of this.regexPatterns) {
-      const m = text.match(rx);
+      const m = text.match(rx) || deepText.match(rx);
       if (m) regexMatched.push(m[0]);
     }
     if (regexMatched.length > 0) {
       return { verdict: Verdict.TOXIC, confidence: 0.88, layer: 1, reason: 'Regex pattern match', matched: regexMatched };
     }
 
-    // ── 变体还原后的正则匹配 ──────────────────────────────────────────────
-    const variantRegexMatched = [];
-    for (const rx of this.regexPatterns) {
-      const m = variantNormalized.match(rx);
-      if (m) variantRegexMatched.push(m[0]);
+    // ── 变体映射还原（保留旧逻辑兼容性）────────────────────────────
+    const legacyVariant = this._normalizeForVariants(text);
+    const legacyMatched = [];
+    for (const kw of this.hardKeywords) {
+      if (legacyVariant.includes(kw)) legacyMatched.push(kw);
     }
-    if (variantRegexMatched.length > 0) {
-      return { verdict: Verdict.TOXIC, confidence: 0.82, layer: 1, reason: 'Variant regex match', matched: variantRegexMatched };
+    if (legacyMatched.length > 0) {
+      return { verdict: Verdict.TOXIC, confidence: 0.82, layer: 1, reason: 'Legacy variant match', matched: legacyMatched };
     }
 
     // Soft keywords: accumulate score
     let softScore = 0;
     const softMatched = [];
     for (const kw of this.softKeywords) {
-      if (text.includes(kw)) {
+      if (text.includes(kw) || deepText.includes(kw)) {
         softMatched.push(kw);
         softScore += 1;
       }
     }
     if (softScore >= 2) {
       return { verdict: Verdict.SUSPICIOUS, confidence: 0.6 + softScore * 0.05, layer: 1, reason: 'Multiple soft keywords', matched: softMatched };
-    }
-
-    // ── 变体还原后的 soft keyword 匹配 ──────────────────────────────────────
-    let variantSoftScore = 0;
-    const variantSoftMatched = [];
-    for (const kw of this.softKeywords) {
-      if (variantNormalized.includes(kw)) {
-        variantSoftMatched.push(kw);
-        variantSoftScore += 1;
-      }
-    }
-    if (variantSoftScore >= 2) {
-      return { verdict: Verdict.SUSPICIOUS, confidence: 0.55 + variantSoftScore * 0.05, layer: 1, reason: 'Variant soft keywords', matched: variantSoftMatched };
     }
 
     return { verdict: Verdict.SAFE, confidence: 0.1, layer: 1, reason: 'No keywords', matched: [] };
@@ -240,42 +359,53 @@ export class Detector {
       signals.push('all_caps'); score += 0.2;
     }
 
-    // Signal: Excessive punctuation (!!!! ????)
+    // Signal: Excessive punctuation
     if (/[!?]{3,}/.test(text)) {
       signals.push('excessive_punctuation'); score += 0.15;
     }
 
-    // Signal: This comment @-mentions the current user (set by platform adapter)
+    // Signal: @-mentions the current user
     if (context.mentionsUser) {
       score += 0.2;
       signals.push('mentions_user');
     }
 
-    // Signal: Short aggressive reply to user (classic "come at me" pattern)
+    // Signal: Short aggressive reply
     if (context.isReply && text.length < 80 && score > 0) {
       signals.push('short_aggressive_reply'); score += 0.1;
     }
 
-    // Signal: Repeated characters (soooo stuuupid)
+    // Signal: Repeated characters
     if (/(.)\1{4,}/.test(text)) {
       signals.push('char_repetition'); score += 0.1;
     }
 
-    // Signal: Emoji aggression (💀🖕🤡 combos)
+    // Signal: Emoji aggression
     const aggressiveEmoji = ['💀', '🖕', '🤡', '🗑️', '🤮', '😡', '🤬', '💩'];
     const emojiHits = aggressiveEmoji.filter(e => text.includes(e));
     if (emojiHits.length >= 2) {
       signals.push('aggressive_emoji'); score += 0.2;
     }
 
-    // ── 上下文敏感规则评估 ──────────────────────────────────────────────
+    // ── 上下文敏感规则评估（增强版） ──────────────────────────────
     const ctxResult = this.contextRuleEngine.evaluate(text);
     if (ctxResult) {
       if (ctxResult.verdict === Verdict.SUSPICIOUS) {
-        return { verdict: Verdict.SUSPICIOUS, confidence: ctxResult.confidence, layer: 2, reason: `Context trigger "${ctxResult.trigger}" + negative signal`, matched: [ctxResult.trigger, ctxResult.matchedSignal] };
+        return {
+          verdict: Verdict.SUSPICIOUS,
+          confidence: ctxResult.confidence,
+          layer: 2,
+          reason: `Context trigger "${ctxResult.trigger}" + negative signal`,
+          matched: [ctxResult.trigger, ctxResult.matchedSignal],
+        };
       }
-      // 触发词出现但无负面信号 → SAFE（不误杀）
-      return { verdict: Verdict.SAFE, confidence: 1.0, layer: 2, reason: ctxResult.note, matched: [ctxResult.trigger] };
+      return {
+        verdict: Verdict.SAFE,
+        confidence: 1.0,
+        layer: 2,
+        reason: ctxResult.note,
+        matched: [ctxResult.trigger],
+      };
     }
 
     if (score >= 0.5) {
@@ -287,86 +417,59 @@ export class Detector {
     return { verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No behavioral signals', matched: [] };
   }
 
-  // ── Utilities ────────────────────────────────────────────────────────────────
+  // ── 拼音还原 ────────────────────────────────────────────────────────────────
 
-  /**
-   * 标准化文本用于关键词匹配。
-   * 去除多余空白，转换为小写。
-   */
-  _normalize(text) {
-    return text
-      .toLowerCase()
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
-  /**
-   * 针对变体/谐音绕过的深度标准化。
-   *
-   * 处理以下绕过方式：
-   * - 空格拆分：傻 逼 → 傻逼
-   * - 特殊符号分隔：傻*逼 → 傻逼
-   * - 全角字符转换：ｓｂ → sb
-   * - 谐音替换映射：煞笔 → 傻逼
-   * - 拼音缩写还原：sha bi → 傻逼
-   * - 英文 leetspeak：k1ll → kill
-   */
-  _normalizeForVariants(text) {
+  _normalizePinyin(text) {
     let result = text.toLowerCase();
-
-    // 1) 全角 → 半角
+    // 全角转半角
     result = result.replace(/[\uff01-\uff5e]/g, c =>
       String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-    result = result.replace(/\u3000/g, ' '); // 全角空格
+    result = result.replace(/\u3000/g, ' ');
 
-    // 2) 去除所有空格（中文词中空格拆分绕过）
+    // 拼音还原
+    for (const [pinyin, chinese] of Object.entries(this.pinyinMap)) {
+      result = result.replace(new RegExp(pinyin, 'gi'), chinese);
+    }
+
+    // 去空格
     result = result.replace(/\s+/g, '');
 
-    // 3) 去除特殊分隔符号（用于拆分中文词的绕过）
-    result = result.replace(/[.*\-_~`|\\/^<>{}()\[\]#!$%&+=;:'",?]/g, '');
-
-    // 4) 应用变体映射（谐音替换、英文 leetspeak）
-    // variant_map 按长度从长到短排序，避免短替换干扰长匹配
+    // 变体映射
     const sortedMap = [...this.variantMap].sort((a, b) => b.from.length - a.from.length);
     for (const rule of sortedMap) {
       result = result.replace(new RegExp(rule.from, 'g'), rule.to);
     }
 
-    // 5) 拼音缩写还原（如 sha bi → 傻逼）
-    // 因为已经去除了空格，需要先处理带空格的拼音词
-    // 这一步在去除空格之前做，所以我们在上面的流程中特殊处理
-    // 实际上我们需要在去空格之前做拼音还原
-    // 重新实现：先做拼音还原，再去空格
+    // 去特殊符号
+    result = result.replace(/[.*\-_~`|\\/^<>{}()\[\]#!$%&+=;:'",?]/g, '');
 
-    // 重新计算：带空格的原始文本做拼音还原
-    let withPinyin = text.toLowerCase();
-    withPinyin = withPinyin.replace(/[\uff01-\uff5e]/g, c =>
+    return result;
+  }
+
+  // ── Utilities ────────────────────────────────────────────────────────────────
+
+  /** 基础标准化（保持向后兼容） */
+  _normalize(text) {
+    return normalizeText(text, { preserveNumbers: true });
+  }
+
+  /**
+   * 变体/谐音深度标准化（保留旧逻辑，作为 fallback）
+   * 新版优先使用 text-normalizer.js 的 normalizeDeep
+   */
+  _normalizeForVariants(text) {
+    let result = text.toLowerCase();
+    result = result.replace(/[\uff01-\uff5e]/g, c =>
       String.fromCharCode(c.charCodeAt(0) - 0xfee0));
-    withPinyin = withPinyin.replace(/\u3000/g, ' ');
+    result = result.replace(/\u3000/g, ' ');
+    result = result.replace(/\s+/g, '');
+    result = result.replace(/[.*\-_~`|\\/^<>{}()\[\]#!$%&+=;:'",?]/g, '');
 
-    // 拼音还原（需要保留空格才能匹配 "sha bi" 等多词拼音）
-    for (const [pinyin, chinese] of Object.entries(this.pinyinMap)) {
-      withPinyin = withPinyin.replace(new RegExp(pinyin, 'gi'), chinese);
-    }
-
-    // 变体映射
+    const sortedMap = [...this.variantMap].sort((a, b) => b.from.length - a.from.length);
     for (const rule of sortedMap) {
-      withPinyin = withPinyin.replace(new RegExp(rule.from, 'g'), rule.to);
+      result = result.replace(new RegExp(rule.from, 'g'), rule.to);
     }
 
-    // 去空格和特殊符号
-    withPinyin = withPinyin.replace(/\s+/g, '');
-    withPinyin = withPinyin.replace(/[.*\-_~`|\\/^<>{}()\[\]#!$%&+=;:'",?]/g, '');
-
-    // 合并两种还原路径的结果，取能匹配更多关键词的那个
-    // 如果拼音还原路径能匹配更多，优先使用
-    let pinyinHits = 0;
-    let directHits = 0;
-    for (const kw of this.hardKeywords) {
-      if (withPinyin.includes(kw)) pinyinHits++;
-      if (result.includes(kw)) directHits++;
-    }
-
-    return pinyinHits > directHits ? withPinyin : result;
+    return result;
   }
 }

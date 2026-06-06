@@ -17,8 +17,12 @@ import { on } from './src/core/events.js';
       enabled: true,
       sensitivity: 'medium',      // 'low' | 'medium' | 'high'
       autoBlock: false,            // auto-trigger platform block
-      aiEnabled: false,            // Layer 3: Claude API
-      apiKey: '',                  // user's Claude API key
+      aiEnabled: false,            // Layer 3: AI semantic
+      aiMode: 'eco',               // 'off' | 'eco' | 'full'
+      aiProvider: 'claude',        // 'claude' | 'openai' | 'custom'
+      apiKey: '',                  // user's API key (empty by default)
+      aiEndpoint: '',              // custom API endpoint URL
+      aiModel: '',                 // custom model override (empty = provider default)
       showBlurred: true,           // show blurred content with reveal option
       evidenceLog: true,           // save evidence automatically
       whitelist: [],               // usernames to always show

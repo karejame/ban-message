@@ -1,5 +1,5 @@
 import { Evidence } from './evidence.js';
-import { t, toggleLang } from './i18n.js';
+import { t, toggleLang, getLang } from './i18n.js';
 import { on, emit } from './events.js';
 
 export const Panel = {
@@ -28,6 +28,9 @@ export const Panel = {
     this._inject();
     this._bind();
     this._listen();
+    // 初始化新增 UI
+    this._renderTopicList();
+    this._updateAIStatusHint();
   },
 
   /** 访问 blocker 的已拉黑集合 */
@@ -83,6 +86,16 @@ export const Panel = {
   _switchLang() {
     const newLang = toggleLang();
     const wasCollapsed = this._el.classList.contains('cs-collapsed');
+
+    // 保存各分区折叠状态
+    const collapsedSections = {};
+    this._el.querySelectorAll('.cs-collapse-section').forEach(sec => {
+      const header = sec.querySelector('.cs-collapse-header');
+      if (header) {
+        collapsedSections[header.dataset.section] = sec.classList.contains('cs-collapsed');
+      }
+    });
+
     console.log(`[CyberShield] Language switched to: ${newLang}`);
     // 重新渲染面板 HTML
     this._el.innerHTML = PANEL_HTML(this._config);
@@ -94,6 +107,26 @@ export const Panel = {
     if (!wasCollapsed) {
       this._setCollapsed(false);
     }
+    // 恢复各分区折叠状态
+    for (const [section, wasClosed] of Object.entries(collapsedSections)) {
+      const header = this._el.querySelector(`.cs-collapse-header[data-section="${section}"]`);
+      if (!header) continue;
+      const secEl = header.closest('.cs-collapse-section');
+      const body = secEl?.querySelector('.cs-collapse-body');
+      const arrow = header.querySelector('.cs-collapse-arrow');
+      if (wasClosed) {
+        secEl?.classList.add('cs-collapsed');
+        if (body) body.style.display = 'none';
+        if (arrow) arrow.innerHTML = '&#9656;';
+      } else if (secEl?.classList.contains('cs-collapsed')) {
+        secEl.classList.remove('cs-collapsed');
+        if (body) body.style.display = '';
+        if (arrow) arrow.innerHTML = '&#9662;';
+      }
+    }
+    // 重新渲染动态内容（话题列表 + AI 状态提示）
+    this._renderTopicList();
+    this._updateAIStatusHint();
     // 更新状态显示
     this._updateStatus();
   },
@@ -175,16 +208,81 @@ export const Panel = {
       this._save();
     });
 
-    el.querySelector('#cs-ai-toggle').addEventListener('change', (e) => {
-      this._config.aiEnabled = e.target.checked;
+    // ── AI 模式选择器 ─────────────────────────────────────────────────
+    el.querySelector('#cs-ai-mode').addEventListener('change', (e) => {
+      this._config.aiMode = e.target.value;
+      this._config.aiEnabled = e.target.value !== 'off';
       this._save();
-      const row = el.querySelector('#cs-api-key-row');
-      if (row) row.style.display = e.target.checked ? 'flex' : 'none';
+      // 更新提示文本
+      const hint = el.querySelector('#cs-ai-mode-hint');
+      if (hint) {
+        hint.textContent = e.target.value === 'off' ? t('aiModeOffDesc') :
+          e.target.value === 'full' ? t('aiModeFullDesc') : t('aiModeEcoDesc');
+      }
+      // 通知 scanner 更新 AI 配置
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({
+          aiMode: this._config.aiMode,
+          aiEnabled: this._config.aiEnabled,
+        });
+      }
     });
 
+    // ── AI Provider 选择器 ─────────────────────────────────────────────
+    el.querySelector('#cs-ai-provider').addEventListener('change', (e) => {
+      this._config.aiProvider = e.target.value;
+      this._save();
+      // 显示/隐藏自定义端点输入框（openai 和 custom 都需要）
+      const endpointField = el.querySelector('#cs-ai-endpoint-field');
+      if (endpointField) {
+        endpointField.style.display = (e.target.value === 'openai' || e.target.value === 'custom') ? 'block' : 'none';
+      }
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({
+          aiProvider: this._config.aiProvider,
+        });
+      }
+    });
+
+    // ── API Key ─────────────────────────────────────────────────────
     el.querySelector('#cs-api-key')?.addEventListener('change', (e) => {
       this._config.apiKey = e.target.value.trim();
       this._save();
+      this._updateAIStatusHint();
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({ apiKey: this._config.apiKey });
+      }
+    });
+
+    // ── 自定义端点 ─────────────────────────────────────────────────
+    el.querySelector('#cs-ai-endpoint')?.addEventListener('change', (e) => {
+      this._config.aiEndpoint = e.target.value.trim();
+      this._save();
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({ aiEndpoint: this._config.aiEndpoint });
+      }
+    });
+
+    // ── 模型 ────────────────────────────────────────────────────────
+    el.querySelector('#cs-ai-model')?.addEventListener('change', (e) => {
+      this._config.aiModel = e.target.value.trim();
+      this._save();
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({ aiModel: this._config.aiModel });
+      }
+    });
+
+    // ── 测试 API Key ─────────────────────────────────────────────────
+    el.querySelector('#cs-ai-test-btn')?.addEventListener('click', async () => {
+      const resultEl = el.querySelector('#cs-ai-test-result');
+      if (resultEl) resultEl.textContent = '...';
+      if (this._scannerRef) {
+        const ok = await this._scannerRef.aiAnalyzer.validateKey();
+        if (resultEl) {
+          resultEl.textContent = ok ? t('aiKeyValid') : t('aiKeyInvalid');
+          resultEl.style.color = ok ? 'var(--cs-success)' : 'var(--cs-danger)';
+        }
+      }
     });
 
     el.querySelector('#cs-auto-block').addEventListener('change', (e) => {
@@ -238,6 +336,27 @@ export const Panel = {
     // ── 拉黑选中 / 取消拉黑 ──────────────────────────────────────────
     el.querySelector('#cs-block-selected-btn')?.addEventListener('click', () => this._blockSelected());
     el.querySelector('#cs-unblock-selected-btn')?.addEventListener('click', () => this._unblockSelected());
+
+    // ── 折叠分区切换 ──────────────────────────────────────────────
+    el.querySelectorAll('.cs-collapse-header').forEach(header => {
+      header.addEventListener('click', () => {
+        const section = header.dataset.section;
+        const body = el.querySelector(`.cs-collapse-body[data-section="${section}"]`);
+        const sectionEl = header.closest('.cs-collapse-section');
+        if (!body || !sectionEl) return;
+
+        const isCollapsed = sectionEl.classList.contains('cs-collapsed');
+        if (isCollapsed) {
+          sectionEl.classList.remove('cs-collapsed');
+          body.style.display = '';
+          header.querySelector('.cs-collapse-arrow').innerHTML = '&#9662;';
+        } else {
+          sectionEl.classList.add('cs-collapsed');
+          body.style.display = 'none';
+          header.querySelector('.cs-collapse-arrow').innerHTML = '&#9656;';
+        }
+      });
+    });
 
     this._makeDraggable(el);
   },
@@ -495,20 +614,40 @@ export const Panel = {
         : t('remoteNever');
     }
 
-    // 2. AI 用量
+    // 2. AI 用量 + Provider 信息
     const aiEl = this._el.querySelector('#cs-sys-ai');
     if (aiEl && scanner.aiAnalyzer) {
-      const used = scanner.aiAnalyzer.getTodayUsage();
-      const limit = scanner.aiAnalyzer.getDailyLimit();
-      aiEl.textContent = `${t('aiUsed', { n: used })} / ${t('aiDailyLimit', { n: limit })}`;
-      aiEl.style.color = used >= limit ? 'var(--cs-danger)' : '';
+      const status = scanner.aiAnalyzer.getStatus();
+      const modeLabel = { off: t('aiModeOff'), eco: t('aiModeEco'), full: t('aiModeFull') };
+      if (status.mode === 'off') {
+        aiEl.textContent = t('aiModeOff');
+        aiEl.style.color = '';
+      } else {
+        aiEl.textContent = `${modeLabel[status.mode] || status.mode} | ${status.provider}/${status.model} | ${t('aiUsed', { n: status.dailyUsed })}/${t('aiDailyLimit', { n: status.dailyLimit })}`;
+        aiEl.style.color = status.isLimitReached ? 'var(--cs-danger)' : '';
+      }
     }
 
-    // 3. 上下文规则
+    // 3. 上下文规则 + 已学习规则
     const ctxEl = this._el.querySelector('#cs-sys-context');
     if (ctxEl && scanner.detector) {
       const rules = scanner.detector.contextRuleEngine?.getAllRules() || [];
-      ctxEl.textContent = t('contextRulesCount', { n: rules.length });
+      const learned = scanner.ruleLearner?.getLearnedKeywords()?.length || 0;
+      ctxEl.textContent = `${t('contextRulesCount', { n: rules.length })} | ${t('learnedKeywords')}: ${learned}`;
+    }
+
+    // 4. 记忆系统统计
+    const memEl = this._el.querySelector('#cs-sys-memory');
+    if (memEl && scanner.memory) {
+      const stats = scanner.memory.getStats();
+      memEl.textContent = t('memoryStats', { n: stats.total });
+    }
+
+    // 5. 上下文窗口统计
+    const cwEl = this._el.querySelector('#cs-sys-context-window');
+    if (cwEl && scanner.contextWindow) {
+      const stats = scanner.contextWindow.getStats();
+      cwEl.textContent = `Users: ${stats.users}, Messages: ${stats.totalMessages}`;
     }
   },
 
@@ -531,6 +670,129 @@ export const Panel = {
 
   _save() {
     GM_setValue('cs_config', JSON.stringify(this._config));
+  },
+
+  /** 更新 AI 状态提示 */
+  _updateAIStatusHint() {
+    const hintEl = this._el?.querySelector('#cs-ai-status-hint');
+    if (!hintEl) return;
+
+    if (!this._config.apiKey) {
+      hintEl.textContent = t('aiNoKey');
+      hintEl.style.color = '';
+      return;
+    }
+
+    if (this._scannerRef?.aiAnalyzer) {
+      const status = this._scannerRef.aiAnalyzer.getStatus();
+      if (status.isLimitReached) {
+        hintEl.textContent = t('aiLimitReached');
+        hintEl.style.color = 'var(--cs-danger)';
+      } else {
+        hintEl.textContent = `${status.provider} / ${status.model}`;
+        hintEl.style.color = 'var(--cs-success)';
+      }
+    }
+  },
+
+  /** 渲染话题偏好列表（含添加/删除所有话题） */
+  _renderTopicList() {
+    const container = this._el?.querySelector('#cs-topic-list');
+    if (!container) return;
+
+    const tf = this._scannerRef?.topicFilter;
+    const topics = tf ? tf.getAllTopics() : [];
+    const currentLang = getLang();
+
+    const topicLabels = {
+      gender_attack: t('topicGenderAttack'),
+      race_attack: t('topicRaceAttack'),
+      personal_attack: t('topicPersonalAttack'),
+      political_extreme: t('topicPoliticalExtreme'),
+      spoiler: t('topicSpoiler'),
+      fan_war: t('topicFanWar'),
+      spam_harass: t('topicSpamHarass'),
+      game_toxic: t('topicGameToxic'),
+    };
+
+    // ── 话题网格列表 ─────────────────────────────────────────────
+    let html = '<div class="cs-topic-grid">';
+    html += topics.map(topic => {
+      const label = topicLabels[topic.id]
+        || topic.label?.[currentLang]
+        || topic.label?.zh
+        || topic.id;
+      const isUser = topic.source === 'user';
+      return `
+        <div class="cs-topic-chip ${topic.enabled ? 'cs-topic-on' : ''}">
+          <label class="cs-topic-chip-inner">
+            <input type="checkbox" class="cs-topic-check" data-topic="${topic.id}" ${topic.enabled ? 'checked' : ''}>
+            <span class="cs-topic-chip-label">${label}</span>
+          </label>
+          <button class="cs-topic-del-btn" data-topic="${topic.id}" data-name="${label}" title="${t('topicCustomDelete')}">×</button>
+        </div>`;
+    }).join('');
+    html += '</div>';
+
+    // ── 自定义话题添加表单 ──────────────────────────────────────
+    html += `
+      <div class="cs-topic-add-form">
+        <div class="cs-topic-add-row">
+          <input type="text" id="cs-topic-add-name" class="cs-input" placeholder="${t('topicCustomName')}">
+          <input type="text" id="cs-topic-add-keywords" class="cs-input" placeholder="${t('topicCustomKeywords')}">
+          <button id="cs-topic-add-btn" class="cs-btn cs-btn-xs">${t('topicAddBtn')}</button>
+        </div>
+      </div>`;
+
+    container.innerHTML = html;
+
+    // ── 绑定事件：话题复选框 ──────────────────────────────────────
+    container.querySelectorAll('.cs-topic-check').forEach(cb => {
+      cb.addEventListener('change', (e) => {
+        const topicId = e.target.dataset.topic;
+        const chip = e.target.closest('.cs-topic-chip');
+        if (chip) chip.classList.toggle('cs-topic-on', e.target.checked);
+        tf?.toggleTopic(topicId, e.target.checked);
+      });
+    });
+
+    // ── 绑定事件：删除任意话题 ───────────────────────────────────
+    container.querySelectorAll('.cs-topic-del-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const topicId = e.target.dataset.topic;
+        const topicName = e.target.dataset.name || topicId;
+        if (tf && confirm(t('topicDelConfirm', { name: topicName }))) {
+          tf.removeTopic(topicId);
+          this._renderTopicList();
+        }
+      });
+    });
+
+    // ── 绑定事件：添加自定义话题 ─────────────────────────────────
+    const addBtn = container.querySelector('#cs-topic-add-btn');
+    const nameInput = container.querySelector('#cs-topic-add-name');
+    const kwInput = container.querySelector('#cs-topic-add-keywords');
+
+    addBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      const name = nameInput?.value.trim();
+      if (!name) {
+        nameInput && (nameInput.style.borderColor = 'var(--cs-danger, #ef4444)');
+        return;
+      }
+      const keywordsStr = kwInput?.value.trim() || '';
+      const keywords = keywordsStr
+        .split(/[,，]/)
+        .map(k => k.trim())
+        .filter(Boolean);
+
+      if (tf) {
+        tf.addUserTopic({ label: name, keywords });
+        this._renderTopicList();
+      }
+    });
   },
 
   // ── 事件监听 ────────────────────────────────────────────────────────────
@@ -950,6 +1212,7 @@ export const Panel = {
 
     const entries = this._evidence.getAll();
     const typeLbl = { comment: t('typeComment'), reply: t('typeReply'), message: t('typeMessage') };
+    const riskColors = { safe: '#22c55e', low: '#f59e0b', medium: '#f59e0b', high: '#ef4444' };
     const modal = document.createElement('div');
     modal.id = 'cs-modal';
     modal.innerHTML = `
@@ -962,26 +1225,62 @@ export const Panel = {
         <div class="cs-modal-body">
           ${entries.length === 0
             ? `<p class="cs-empty">${t('emptyLog')}</p>`
-            : entries.slice(0, 100).map(e => `
-              <div class="cs-entry">
+            : entries.slice(0, 100).map((e, i) => {
+              const riskLevel = e.result?.riskLevel || (e.verdict === 'toxic' ? 'high' : 'medium');
+              const riskColor = riskColors[riskLevel] || '#888';
+              const explainChain = e.result?.explainChain || [];
+              return `
+              <div class="cs-entry ${e.falsePositive ? 'cs-false-positive' : ''}" data-index="${i}">
                 <div class="cs-entry-meta">
                   <span class="cs-entry-user">${escapeHtml(e.username)}</span>
                   <span class="cs-entry-verdict cs-verdict-${e.verdict || 'unknown'}">${e.verdict || '--'}</span>
+                  <span class="cs-entry-risk" style="color:${riskColor}">${t('risk' + riskLevel.charAt(0).toUpperCase() + riskLevel.slice(1))}</span>
                   ${e.contentType ? `<span class="cs-entry-type">${typeLbl[e.contentType] || e.contentType}</span>` : ''}
                   <span class="cs-entry-time">${new Date(e.timestamp).toLocaleString()}</span>
                 </div>
                 <div class="cs-entry-text">${escapeHtml(e.text || '')}</div>
                 ${e.url ? `<div class="cs-entry-url"><a href="${escapeHtml(e.url)}" target="_blank">${escapeHtml(e.url)}</a></div>` : ''}
+                ${explainChain.length > 0 ? `
+                  <div class="cs-entry-explain">
+                    <span class="cs-explain-title">${t('explainTitle')}:</span>
+                    ${explainChain.map(step => `
+                      <span class="cs-explain-step">
+                        Layer ${step.layer}: ${step.reason || step.verdict || ''}
+                        ${step.matched ? `[${step.matched.join(', ')}]` : ''}
+                      </span>
+                    `).join(' → ')}
+                  </div>
+                ` : ''}
+                ${e.result?.matched ? `<div class="cs-entry-matched">${t('explainMatched')}: ${e.result.matched.map(m => `<code>${escapeHtml(m)}</code>`).join(', ')}</div>` : ''}
+                <div class="cs-entry-actions">
+                  ${!e.falsePositive ? `<button class="cs-fp-btn" data-index="${i}">${t('falsePositive')}</button>` : '<span class="cs-fp-marked">&#x2713; FP</span>'}
+                </div>
               </div>
-            `).join('')
+            `}).join('')
           }
         </div>
       </div>
     `;
     document.body.appendChild(modal);
 
+    // 关闭按钮
     document.getElementById('cs-modal-close').addEventListener('click', () => modal.remove());
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+
+    // 误判标记按钮
+    modal.querySelectorAll('.cs-fp-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = parseInt(e.target.dataset.index, 10);
+        if (this._scannerRef) {
+          const result = this._scannerRef.markFalsePositive(idx);
+          if (result.success) {
+            e.target.outerHTML = `<span class="cs-fp-marked">&#x2713; ${result.deletedRules ? t('falsePositiveDeleted') : t('falsePositiveDone')}</span>`;
+            const entry = modal.querySelector(`.cs-entry[data-index="${idx}"]`);
+            if (entry) entry.classList.add('cs-false-positive');
+          }
+        }
+      });
+    });
   },
 
   _renderKeywordList(keywords) {
@@ -1156,7 +1455,14 @@ function PANEL_HTML(config) {
 
         <div class="cs-divider"></div>
 
-        <!-- ── 基础控制 ─────────────────────────────────────────────── -->
+        <!-- ── 基础控制 ── (可折叠) ──────────────────────────────── -->
+        <div class="cs-collapse-section">
+          <div class="cs-collapse-header" data-section="basic">
+            <span class="cs-collapse-arrow">&#9662;</span>
+            <span>${t('sectionBasic')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="basic">
+
         <div class="cs-toggle-row">
           <span class="cs-label">${t('protection')}</span>
           <label class="cs-switch">
@@ -1182,19 +1488,77 @@ function PANEL_HTML(config) {
           </label>
         </div>
 
+          </div>
+        </div>
+
+        <!-- ── AI 语义分析 ── (可折叠) ───────────────────────────── -->
+        <div class="cs-collapse-section">
+          <div class="cs-collapse-header" data-section="ai">
+            <span class="cs-collapse-arrow">&#9662;</span>
+            <span>${t('sectionAI')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="ai">
+
         <div class="cs-toggle-row">
           <span class="cs-label">${t('aiMode')}</span>
-          <label class="cs-switch">
-            <input type="checkbox" id="cs-ai-toggle" ${config.aiEnabled ? 'checked' : ''} disabled>
-            <span class="cs-slider"></span>
-          </label>
+          <select id="cs-ai-mode" class="cs-select cs-select-sm">
+            <option value="off" ${config.aiMode === 'off' ? 'selected' : ''}>${t('aiModeOff')}</option>
+            <option value="eco" ${(!config.aiMode || config.aiMode === 'eco') ? 'selected' : ''}>${t('aiModeEco')}</option>
+            <option value="full" ${config.aiMode === 'full' ? 'selected' : ''}>${t('aiModeFull')}</option>
+          </select>
         </div>
-        <div class="cs-hint cs-ai-disabled-hint">${t('aiDisabled')}</div>
+        <div class="cs-hint" id="cs-ai-mode-hint">${
+          config.aiMode === 'off' ? t('aiModeOffDesc') :
+          config.aiMode === 'full' ? t('aiModeFullDesc') : t('aiModeEcoDesc')
+        }</div>
 
-        <div class="cs-api-row" id="cs-api-key-row" style="display:none">
-          <span class="cs-label cs-label-sm">${t('apiKey')}</span>
-          <input type="password" id="cs-api-key" class="cs-input" placeholder="${t('apiKeyPlaceholder')}" value="${config.apiKey || ''}">
-          <span class="cs-hint">${t('aiDesc')}</span>
+        <div class="cs-api-row" id="cs-api-config-row">
+          <div class="cs-api-field">
+            <span class="cs-label cs-label-sm">${t('aiProvider')}</span>
+            <select id="cs-ai-provider" class="cs-select cs-select-sm">
+              <option value="claude" ${(!config.aiProvider || config.aiProvider === 'claude') ? 'selected' : ''}>${t('aiProviderClaude')}</option>
+              <option value="openai" ${config.aiProvider === 'openai' ? 'selected' : ''}>${t('aiProviderOpenAI')}</option>
+              <option value="custom" ${config.aiProvider === 'custom' ? 'selected' : ''}>${t('aiProviderCustom')}</option>
+            </select>
+          </div>
+          <div class="cs-api-field">
+            <span class="cs-label cs-label-sm">${t('apiKey')}</span>
+            <input type="password" id="cs-api-key" class="cs-input" placeholder="${t('apiKeyPlaceholder')}" value="${config.apiKey || ''}">
+          </div>
+          <div class="cs-api-field" id="cs-ai-endpoint-field" style="display:${(config.aiProvider === 'openai' || config.aiProvider === 'custom') ? 'block' : 'none'}">
+            <span class="cs-label cs-label-sm">${t('aiEndpoint')}</span>
+            <input type="text" id="cs-ai-endpoint" class="cs-input" placeholder="${t('aiEndpointPlaceholder')}" value="${config.aiEndpoint || ''}">
+          </div>
+          <div class="cs-api-field">
+            <span class="cs-label cs-label-sm">${t('aiModel')}</span>
+            <input type="text" id="cs-ai-model" class="cs-input" placeholder="${t('aiModelPlaceholder')}" value="${config.aiModel || ''}">
+          </div>
+          <div class="cs-api-field" style="display:flex;align-items:center;gap:8px;margin-top:4px">
+            <button id="cs-ai-test-btn" class="cs-btn cs-btn-xs">${t('aiTestBtn')}</button>
+            <span id="cs-ai-test-result" class="cs-hint" style="margin:0"></span>
+          </div>
+          <div id="cs-ai-status-hint" class="cs-hint" style="margin-top:4px">
+            ${!config.apiKey ? t('aiNoKey') : ''}
+          </div>
+        </div>
+
+          </div>
+        </div>
+
+        <div class="cs-divider"></div>
+
+        <!-- ── 话题偏好 ── (可折叠) ──────────────────────────────── -->
+        <div class="cs-collapse-section">
+          <div class="cs-collapse-header" data-section="topic">
+            <span class="cs-collapse-arrow">&#9662;</span>
+            <span>${t('sectionTopic')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="topic">
+        <div class="cs-hint" style="margin-bottom:6px">${t('topicDesc')}</div>
+        <div id="cs-topic-list" class="cs-topic-list">
+          <!-- 由 JS 动态渲染 -->
+        </div>
+          </div>
         </div>
 
         <div class="cs-divider"></div>
@@ -1207,9 +1571,14 @@ function PANEL_HTML(config) {
 
         <div class="cs-divider"></div>
 
-        <!-- ── 系统状态 ─────────────────────────────────────────── -->
-        <div class="cs-section-header" style="display:flex;justify-content:space-between;align-items:center">
-          <span>${t('sysTitle')}</span>
+        <!-- ── 系统状态 ── (可折叠) ───────────────────────────────── -->
+        <div class="cs-collapse-section cs-collapsed">
+          <div class="cs-collapse-header" data-section="system">
+            <span class="cs-collapse-arrow">&#9656;</span>
+            <span>${t('sectionSystem')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="system" style="display:none">
+        <div style="display:flex;justify-content:flex-start;margin-bottom:4px">
           <button id="cs-sys-refresh" class="cs-btn cs-btn-xs cs-btn-ghost">${t('refresh')}</button>
         </div>
         <div id="cs-sys-status" class="cs-sys-status">
@@ -1225,22 +1594,44 @@ function PANEL_HTML(config) {
             <span class="cs-stats-label">${t('contextRules')}</span>
             <span class="cs-stats-val" id="cs-sys-context">--</span>
           </div>
+          <div class="cs-stats-row">
+            <span class="cs-stats-label">${t('memoryTitle')}</span>
+            <span class="cs-stats-val" id="cs-sys-memory">--</span>
+          </div>
+          <div class="cs-stats-row">
+            <span class="cs-stats-label" style="font-size:10px">Context Window</span>
+            <span class="cs-stats-val" id="cs-sys-context-window">--</span>
+          </div>
+        </div>
+          </div>
         </div>
 
         <div class="cs-divider"></div>
 
-        <!-- ── 屏蔽规则 ─────────────────────────────────────────── -->
-        <div class="cs-section-header" style="display:flex;justify-content:space-between;align-items:center">
-          <span>${t('rulesTitle')}</span>
-          <button id="cs-rules-view-btn" class="cs-btn cs-btn-xs cs-btn-ghost">${t('view')}</button>
+        <!-- ── 屏蔽规则 ── (可折叠) ───────────────────────────────── -->
+        <div class="cs-collapse-section cs-collapsed">
+          <div class="cs-collapse-header" data-section="rules">
+            <span class="cs-collapse-arrow">&#9656;</span>
+            <span>${t('sectionRules')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="rules" style="display:none">
+        <div id="cs-rules-view-area">
+          <div style="display:flex;justify-content:flex-start;margin-bottom:4px">
+            <button id="cs-rules-view-btn" class="cs-btn cs-btn-xs cs-btn-ghost">${t('view')}</button>
+          </div>
+        </div>
+          </div>
         </div>
 
         <div class="cs-divider"></div>
 
-        <!-- ── 自定义关键词 ─────────────────────────────────────────── -->
-        <div class="cs-section-header">
-          <span>${t('customTitle')}</span>
-        </div>
+        <!-- ── 自定义关键词 ── (可折叠) ─────────────────────────────── -->
+        <div class="cs-collapse-section cs-collapsed">
+          <div class="cs-collapse-header" data-section="custom">
+            <span class="cs-collapse-arrow">&#9656;</span>
+            <span>${t('sectionCustom')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="custom" style="display:none">
         <div class="cs-custom-input-row">
           <input type="text" id="cs-custom-input" class="cs-input" placeholder="${t('customPlaceholder')}">
           <button id="cs-custom-add-btn" class="cs-btn cs-btn-sm">${t('customAdd')}</button>
@@ -1252,6 +1643,8 @@ function PANEL_HTML(config) {
           <button id="cs-custom-clear-btn" class="cs-btn">${t('customClearAll')}</button>
           <button id="cs-custom-import-btn" class="cs-btn">${t('customImport')}</button>
           <button id="cs-custom-export-btn" class="cs-btn">${t('customExport')}</button>
+        </div>
+          </div>
         </div>
 
         <div class="cs-divider"></div>
@@ -2216,6 +2609,100 @@ const PANEL_CSS = `
     padding: 8px 12px; border-radius: 6px; font-family: monospace;
     font-size: 11px; color: var(--cs-text); word-break: break-all;
   }
+
+  /* ── AI Semantic Module UI ─────────────────────────────────────── */
+  .cs-select-sm { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+  .cs-api-field { margin-bottom: 8px; }
+  .cs-api-field .cs-label { display: block; margin-bottom: 2px; }
+
+  /* ── Collapsible sections ─────────────────────────────────── */
+  .cs-collapse-section { margin-bottom: 2px; }
+  .cs-collapse-header {
+    display: flex; align-items: center; gap: 6px;
+    padding: 6px 4px; cursor: pointer;
+    font-size: 12px; font-weight: 600;
+    color: var(--cs-text); user-select: none;
+    border-radius: 4px; transition: background 0.15s;
+  }
+  .cs-collapse-header:hover { background: var(--cs-bg-body); }
+  .cs-collapse-arrow {
+    font-size: 10px; color: var(--cs-text-secondary);
+    width: 12px; text-align: center; flex-shrink: 0;
+  }
+  .cs-collapse-body { padding: 4px 0 2px 0; }
+
+  /* Topic preferences — compact grid */
+  .cs-topic-list {
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 260px; overflow-y: auto;
+  }
+  .cs-topic-grid {
+    display: flex; flex-wrap: wrap; gap: 6px;
+  }
+  .cs-topic-chip {
+    display: inline-flex; align-items: center; gap: 2px;
+    background: var(--cs-bg-body); border: 1px solid var(--cs-border);
+    border-radius: 14px; padding: 2px 4px 2px 8px;
+    transition: all 0.15s; font-size: 12px;
+  }
+  .cs-topic-chip.cs-topic-on {
+    background: color-mix(in srgb, var(--cs-accent) 12%, transparent);
+    border-color: color-mix(in srgb, var(--cs-accent) 40%, transparent);
+  }
+  .cs-topic-chip-inner {
+    display: inline-flex; align-items: center; gap: 4px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .cs-topic-chip-inner input[type="checkbox"] {
+    accent-color: var(--cs-accent); margin: 0;
+    width: 13px; height: 13px;
+  }
+  .cs-topic-chip-label { font-size: 11px; line-height: 1.2; }
+  .cs-topic-del-btn {
+    background: none; border: none; color: var(--cs-text-secondary);
+    font-size: 13px; cursor: pointer; padding: 0 3px; line-height: 1;
+    border-radius: 50%; transition: color 0.15s; opacity: 0.5;
+  }
+  .cs-topic-chip:hover .cs-topic-del-btn { opacity: 1; }
+  .cs-topic-del-btn:hover { color: var(--cs-danger, #ef4444); }
+  .cs-topic-add-form {
+    margin-top: 8px; padding-top: 6px;
+    border-top: 1px dashed var(--cs-border);
+  }
+  .cs-topic-add-row {
+    display: flex; align-items: center; gap: 6px;
+  }
+  .cs-topic-add-row .cs-input { font-size: 11px; padding: 4px 8px; flex: 1; min-width: 0; }
+
+  /* Evidence modal — explainability */
+  .cs-entry-explain {
+    margin-top: 4px; padding: 4px 8px;
+    background: var(--cs-bg-body); border-radius: 4px;
+    font-size: 11px; color: var(--cs-text-secondary);
+  }
+  .cs-explain-title { font-weight: 600; margin-right: 4px; }
+  .cs-explain-step { display: inline; }
+  .cs-entry-matched {
+    margin-top: 2px; font-size: 11px;
+    color: var(--cs-text-secondary);
+  }
+  .cs-entry-matched code {
+    background: var(--cs-bg-body); padding: 1px 4px; border-radius: 3px;
+    font-size: 10px;
+  }
+  .cs-entry-actions { margin-top: 6px; }
+  .cs-fp-btn {
+    background: none; border: 1px solid var(--cs-border);
+    border-radius: 4px; padding: 2px 8px; font-size: 11px;
+    color: var(--cs-text-secondary); cursor: pointer;
+  }
+  .cs-fp-btn:hover { background: var(--cs-bg-body); color: var(--cs-accent); }
+  .cs-fp-marked { font-size: 11px; color: var(--cs-success, #22c55e); }
+  .cs-false-positive { opacity: 0.6; }
+  .cs-entry-risk { font-size: 11px; font-weight: 600; }
+
+  /* AI test result */
+  #cs-ai-test-result { font-size: 11px; }
 `;
 
 function escapeHtml(str) {
