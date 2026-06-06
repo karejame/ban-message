@@ -135,6 +135,9 @@ export class Scanner {
    */
   manualScan() {
     console.log('[CyberShield] Manual scan triggered');
+    // ★ 重置已处理记录，确保所有评论都能被重新扫描
+    // 这对于新添加的自定义关键词生效至关重要
+    this._seen = new WeakSet();
     this._scanAll();
     this._detectSpam();
     this._detectHarassment();
@@ -607,6 +610,9 @@ export class Scanner {
     if (this._seen.has(el)) return;
     this._seen.add(el);
 
+    // ★ 跳过已被模糊处理的元素（避免重复扫描导致按钮重复）
+    if (el.dataset.csVerdict) return;
+
     // ★ 检测内容类型：评论/回复/私信
     const contentType = this._detectContentType(el);
 
@@ -839,7 +845,18 @@ export class Scanner {
 
         for (const el of data.elements) {
           const contentType = this._detectContentType(el);
-          const targetEl = this._findTextElement(el, contentType) || el;
+          let targetEl = this._findTextElement(el, contentType);
+          if (!targetEl) {
+            const children = el.querySelectorAll('p, span, div');
+            for (const child of children) {
+              const childText = child.innerText?.trim() || '';
+              if (childText.length >= 3 && childText.length < 2000 && child.children.length === 0) {
+                targetEl = child;
+                break;
+              }
+            }
+          }
+          if (!targetEl) targetEl = el;
           this._blurContent(targetEl, { reason: t('harassReason', { user: username, count: data.count }) }, 'harass');
         }
 
@@ -860,7 +877,18 @@ export class Scanner {
   _handleSpam(el, text, count) {
     // ★ 只屏蔽文本内容，而非整个条目
     const contentType = this._detectContentType(el);
-    const targetEl = this._findTextElement(el, contentType) || el;
+    let targetEl = this._findTextElement(el, contentType);
+    if (!targetEl) {
+      const children = el.querySelectorAll('p, span, div');
+      for (const child of children) {
+        const childText = child.innerText?.trim() || '';
+        if (childText.length >= 3 && childText.length < 2000 && child.children.length === 0) {
+          targetEl = child;
+          break;
+        }
+      }
+    }
+    if (!targetEl) targetEl = el;
     this._blurContent(targetEl, { reason: t('spamReason', { count }) }, 'spam');
 
     // 扫描日志记录
@@ -891,8 +919,20 @@ export class Scanner {
       }
     }).catch(() => {});
 
-    // ★ 只屏蔽违规文本内容，而非整个评论条目
-    const targetEl = this._findTextElement(el, contentType) || el;
+    // ★ 优先屏蔽文本元素；若找不到，尝试在容器内直接查找含文本的子元素
+    let targetEl = this._findTextElement(el, contentType);
+    if (!targetEl) {
+      // Fallback: 在容器内查找包含长文本的子元素（避免模糊整个容器导致按钮不可见）
+      const children = el.querySelectorAll('p, span, div');
+      for (const child of children) {
+        const childText = child.innerText?.trim() || '';
+        if (childText.length >= 3 && childText.length < 2000 && child.children.length === 0) {
+          targetEl = child;
+          break;
+        }
+      }
+    }
+    if (!targetEl) targetEl = el;
     this._blurContent(targetEl, result, 'toxic');
 
     if (this.config.autoBlock && username) {
@@ -919,6 +959,8 @@ export class Scanner {
   /**
    * 定位包含评论文本的具体元素（而非整个评论容器）。
    * 返回文本元素用于精确屏蔽，避免把头像、用户名、时间戳也一起模糊。
+   * ★ 增强版：优先寻找 shadow DOM 中最底层的纯文本容器（如 <p>），
+   *   确保 filter: blur() 能正确作用于实际显示文本的节点。
    */
   _findTextElement(el, contentType) {
     let sel;
@@ -933,20 +975,45 @@ export class Scanner {
 
     // 1. 传统 DOM
     const textEl = el.querySelector(sel);
-    if (textEl) return textEl;
+    if (textEl) {
+      // 如果找到的是 Web Component，尝试进入其 shadowRoot 找 <p>
+      if (textEl.shadowRoot) {
+        const pEl = textEl.shadowRoot.querySelector('p, [class*="text"], [class*="content"], span');
+        if (pEl && pEl.innerText?.trim().length >= 3) return pEl;
+      }
+      return textEl;
+    }
 
     // 2. Shadow DOM 穿透
     const shadowTextEl = this._deepQuerySelectorInEl(el, sel);
-    if (shadowTextEl) return shadowTextEl;
+    if (shadowTextEl) {
+      if (shadowTextEl.shadowRoot) {
+        const innerText = shadowTextEl.shadowRoot.querySelector('p, [class*="text"], span');
+        if (innerText && innerText.innerText?.trim().length >= 3) return innerText;
+      }
+      return shadowTextEl;
+    }
 
-    // 3. Web Component 自身 shadowRoot 内（如 bili-rich-text → shadow → <p>）
+    // 3. Web Component 自身 shadowRoot 内 — 最深层的文本容器
     if (el.shadowRoot) {
       const richTextEl = this._deepQuerySelectorInEl(el, 'bili-rich-text');
       if (richTextEl?.shadowRoot) {
         const pEl = richTextEl.shadowRoot.querySelector('p');
-        if (pEl) return pEl;
+        if (pEl && pEl.innerText?.trim().length >= 3) return pEl;
+        // fallback: 找任意有长文本的元素
+        const anyTextEl = richTextEl.shadowRoot.querySelector('[class*="text"], [class*="content"], span, div');
+        if (anyTextEl && anyTextEl.innerText?.trim().length >= 3) return anyTextEl;
       }
       if (richTextEl) return richTextEl;
+    }
+
+    // 4. 通用 fallback：在 el 子树中找任意包含长文本的叶子节点
+    const allTextCandidates = el.shadowRoot
+      ? this._deepQuerySelectorInEl(el, 'p, span, [class*="text"], [class*="content"]')
+      : el.querySelector('p, span, [class*="text"], [class*="content"]');
+    if (allTextCandidates) {
+      const text = allTextCandidates.innerText?.trim() || '';
+      if (text.length >= 3) return allTextCandidates;
     }
 
     return null;
@@ -964,10 +1031,18 @@ export class Scanner {
   _blurContent(targetEl, result, type = 'toxic') {
     targetEl.dataset.csVerdict = type;
     targetEl.dataset.csReason = result.reason;
-    targetEl.classList.add('cs-blurred');
+    // ★ 使用内联样式替代 CSS 类，确保在 Shadow DOM 内也能生效
+    // GM_addStyle 注入的 CSS 无法穿透 Shadow DOM 边界
+    targetEl.style.filter = 'blur(12px)';
+    targetEl.style.pointerEvents = 'none';
+    targetEl.style.userSelect = 'none';
+    targetEl.style.opacity = '0.5';
+    targetEl.style.transition = 'filter 0.2s ease, opacity 0.2s ease';
 
     // ★ 移除已有的显示/屏蔽按钮，防止重复扫描产生多个按钮
     const parentEl = targetEl.parentNode || document.body;
+    // ★ 同时在文档级别移除所有相关按钮（防止 Shadow DOM 内外按钮残留）
+    document.querySelectorAll('.cs-reveal-float, .cs-reblock-btn').forEach(b => b.remove());
     if (parentEl) {
       parentEl.querySelectorAll('.cs-reveal-float, .cs-reblock-btn').forEach(b => b.remove());
     }
@@ -980,30 +1055,45 @@ export class Scanner {
     if (type === 'spam') btn.classList.add('cs-spam-overlay');
     if (type === 'harass') btn.classList.add('cs-harass-overlay');
 
-    // ★ 定位策略：按钮放在目标元素右侧（inline 方式跟随流式布局）
-    // parentEl 已在上方声明，复用即可
-
-    // 尝试 inline 插入到目标元素后面（自然跟随布局流）
+    // ★ 定位策略：按钮放在目标元素右侧
+    // 优先尝试 inline 插入到目标元素后面
+    // 如果目标元素在 Shadow DOM 内，则使用 absolute 定位到文档 body
     let useInline = false;
-    try {
-      if (targetEl.nextSibling) {
-        parentEl.insertBefore(btn, targetEl.nextSibling);
-      } else {
-        parentEl.appendChild(btn);
+    const isInShadow = targetEl.getRootNode() instanceof ShadowRoot;
+
+    if (!isInShadow) {
+      try {
+        if (targetEl.nextSibling) {
+          parentEl.insertBefore(btn, targetEl.nextSibling);
+        } else {
+          parentEl.appendChild(btn);
+        }
+        useInline = true;
+      } catch (e) {
+        // 插入失败，使用 absolute 定位
       }
-      useInline = true;
-    } catch (e) {
-      // Shadow DOM 中无法插入，使用 absolute 定位
     }
 
     if (!useInline) {
-      // ★ fallback：absolute 定位到目标元素右侧
-      const parentRect = parentEl.getBoundingClientRect();
+      // ★ Shadow DOM 内元素或插入失败：使用 fixed 定位到目标元素右侧
       const targetRect = targetEl.getBoundingClientRect();
-      btn.style.position = 'absolute';
-      btn.style.top = (targetRect.top - parentRect.top + parentEl.scrollTop) + 'px';
-      btn.style.left = (targetRect.right - parentRect.left + parentEl.scrollLeft + 8) + 'px';
-      parentEl.appendChild(btn);
+      btn.style.position = 'fixed';
+      btn.style.top = `${targetRect.top}px`;
+      btn.style.left = `${targetRect.right + 8}px`;
+      btn.style.zIndex = '2147483647';
+      document.body.appendChild(btn);
+
+      // ★ 滚动时更新 fixed 按钮位置
+      const updatePos = () => {
+        if (!btn.isConnected) { window.removeEventListener('scroll', updatePos, true); return; }
+        const r = targetEl.getBoundingClientRect();
+        btn.style.top = `${r.top}px`;
+        btn.style.left = `${r.right + 8}px`;
+      };
+      window.addEventListener('scroll', updatePos, true);
+      // 清理：按钮移除时取消监听
+      const origRemove = btn.remove.bind(btn);
+      btn.remove = () => { window.removeEventListener('scroll', updatePos, true); origRemove(); };
     }
 
     // ★ 监听目标元素最近的可滚动祖先的 scroll 事件
@@ -1028,7 +1118,11 @@ export class Scanner {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      targetEl.classList.remove('cs-blurred');
+      // ★ 使用内联样式清除，与 _blurContent 对应
+      targetEl.style.filter = '';
+      targetEl.style.pointerEvents = '';
+      targetEl.style.userSelect = '';
+      targetEl.style.opacity = '';
       btn.remove();
       observer.disconnect();
       this._addReBlockOption(targetEl, result, type);
@@ -1043,6 +1137,8 @@ export class Scanner {
   _addReBlockOption(targetEl, result, type) {
     // ★ 移除已有的再次屏蔽按钮，防止重复
     const parentEl = targetEl.parentNode;
+    // ★ 同时清理文档级别的残留按钮
+    document.querySelectorAll('.cs-reblock-btn, .cs-reveal-float').forEach(b => b.remove());
     if (parentEl) {
       parentEl.querySelectorAll('.cs-reblock-btn').forEach(b => b.remove());
     }
@@ -1055,23 +1151,49 @@ export class Scanner {
       e.stopPropagation();
       e.preventDefault();
       reBlockBtn.remove();
+      // ★ 重新应用内联样式模糊
       this._blurContent(targetEl, result, type);
     });
 
-    // 插入到文本元素后面（inline 方式，跟随自然流式布局）
-    try {
-      if (targetEl.nextSibling) {
-        targetEl.parentNode.insertBefore(reBlockBtn, targetEl.nextSibling);
-      } else {
-        targetEl.parentNode.appendChild(reBlockBtn);
+    // ★ 处理 Shadow DOM 内元素的情况
+    const isInShadow = targetEl.getRootNode() instanceof ShadowRoot;
+
+    if (!isInShadow) {
+      // 插入到文本元素后面（inline 方式，跟随自然流式布局）
+      try {
+        if (targetEl.nextSibling) {
+          targetEl.parentNode.insertBefore(reBlockBtn, targetEl.nextSibling);
+        } else {
+          targetEl.parentNode.appendChild(reBlockBtn);
+        }
+      } catch (e) {
+        // fallback: fixed 定位
+        const r = targetEl.getBoundingClientRect();
+        reBlockBtn.style.position = 'fixed';
+        reBlockBtn.style.top = `${r.top}px`;
+        reBlockBtn.style.left = `${r.right + 8}px`;
+        reBlockBtn.style.zIndex = '2147483647';
+        document.body.appendChild(reBlockBtn);
       }
-    } catch (e) {
-      // fallback: 绝对定位到目标元素下方
+    } else {
+      // Shadow DOM 内元素：fixed 定位到目标元素右侧
       const r = targetEl.getBoundingClientRect();
-      reBlockBtn.style.position = 'absolute';
-      reBlockBtn.style.top = (r.bottom + window.pageYOffset + 4) + 'px';
-      reBlockBtn.style.left = (r.left + window.pageXOffset) + 'px';
+      reBlockBtn.style.position = 'fixed';
+      reBlockBtn.style.top = `${r.top}px`;
+      reBlockBtn.style.left = `${r.right + 8}px`;
+      reBlockBtn.style.zIndex = '2147483647';
       document.body.appendChild(reBlockBtn);
+
+      // ★ 滚动时更新 fixed 按钮位置
+      const updatePos = () => {
+        if (!reBlockBtn.isConnected) { window.removeEventListener('scroll', updatePos, true); return; }
+        const rect = targetEl.getBoundingClientRect();
+        reBlockBtn.style.top = `${rect.top}px`;
+        reBlockBtn.style.left = `${rect.right + 8}px`;
+      };
+      window.addEventListener('scroll', updatePos, true);
+      const origRemove = reBlockBtn.remove.bind(reBlockBtn);
+      reBlockBtn.remove = () => { window.removeEventListener('scroll', updatePos, true); origRemove(); };
     }
   }
 
@@ -1434,10 +1556,11 @@ export class Scanner {
 
 GM_addStyle(`
   .cs-blurred {
-    filter: blur(8px);
-    pointer-events: none;
-    user-select: none;
+    filter: blur(12px) !important;
+    pointer-events: none !important;
+    user-select: none !important;
     transition: filter 0.2s ease;
+    opacity: 0.5;
   }
 
   /* ★ 小浮动按钮：放在气泡右侧，不遮挡对话内容 */
@@ -1445,18 +1568,18 @@ GM_addStyle(`
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 2px 10px;
+    padding: 4px 12px;
     border: 1px solid var(--cs-border, #ccc);
     border-radius: 12px;
     background: var(--cs-bg, #fff);
     color: var(--cs-text, #555);
     cursor: pointer;
-    font-size: 11px;
-    line-height: 1.4;
+    font-size: 13px;
+    line-height: 1.5;
     white-space: nowrap;
     vertical-align: middle;
     margin-left: 6px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     transition: background 0.15s, box-shadow 0.15s;
     z-index: 9999;
     position: relative;
@@ -1488,13 +1611,13 @@ GM_addStyle(`
   }
 
   .cs-reveal-btn {
-    padding: 4px 14px;
+    padding: 6px 16px;
     border: 1px solid var(--cs-border, #ccc);
     border-radius: 6px;
     background: var(--cs-bg, #fff);
     color: var(--cs-text, #333);
     cursor: pointer;
-    font-size: 12px;
+    font-size: 13px;
     transition: background 0.15s;
   }
 
@@ -1506,14 +1629,14 @@ GM_addStyle(`
 
   .cs-reblock-btn {
     display: inline-block;
-    padding: 2px 10px;
+    padding: 4px 12px;
     border: 1px solid var(--cs-danger, #ef4444);
     border-radius: 6px;
     background: color-mix(in srgb, var(--cs-danger, #ef4444) 10%, var(--cs-bg, #fff));
     background: rgba(239, 68, 68, 0.08);
     color: var(--cs-danger, #ef4444);
     cursor: pointer;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     margin-left: 6px;
     transition: background 0.15s;

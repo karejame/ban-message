@@ -27,6 +27,7 @@ export const Panel = {
     // ★ _blockedSet 现由 Blocker 统一管理，Panel 通过 getter 访问
     this._inject();
     this._bind();
+    this._restoreCollapseState();
     this._listen();
     // 初始化新增 UI
     this._renderTopicList();
@@ -87,48 +88,64 @@ export const Panel = {
     const newLang = toggleLang();
     const wasCollapsed = this._el.classList.contains('cs-collapsed');
 
-    // 保存各分区折叠状态
-    const collapsedSections = {};
-    this._el.querySelectorAll('.cs-collapse-section').forEach(sec => {
-      const header = sec.querySelector('.cs-collapse-header');
-      if (header) {
-        collapsedSections[header.dataset.section] = sec.classList.contains('cs-collapsed');
-      }
-    });
-
     console.log(`[CyberShield] Language switched to: ${newLang}`);
     // 重新渲染面板 HTML
     this._el.innerHTML = PANEL_HTML(this._config);
     // 重新绑定事件
     this._bind();
+    // 恢复折叠状态（从 GM 存储）
+    this._restoreCollapseState();
     // 恢复当前页面
     this._switchPage(this._currentPage);
     // 恢复折叠状态
     if (!wasCollapsed) {
       this._setCollapsed(false);
     }
-    // 恢复各分区折叠状态
-    for (const [section, wasClosed] of Object.entries(collapsedSections)) {
-      const header = this._el.querySelector(`.cs-collapse-header[data-section="${section}"]`);
-      if (!header) continue;
-      const secEl = header.closest('.cs-collapse-section');
-      const body = secEl?.querySelector('.cs-collapse-body');
-      const arrow = header.querySelector('.cs-collapse-arrow');
-      if (wasClosed) {
-        secEl?.classList.add('cs-collapsed');
-        if (body) body.style.display = 'none';
-        if (arrow) arrow.innerHTML = '&#9656;';
-      } else if (secEl?.classList.contains('cs-collapsed')) {
-        secEl.classList.remove('cs-collapsed');
-        if (body) body.style.display = '';
-        if (arrow) arrow.innerHTML = '&#9662;';
-      }
-    }
     // 重新渲染动态内容（话题列表 + AI 状态提示）
     this._renderTopicList();
     this._updateAIStatusHint();
     // 更新状态显示
     this._updateStatus();
+  },
+
+  /**
+   * 保存折叠分区状态到 GM 存储。
+   */
+  _saveCollapseState() {
+    const state = {};
+    this._el.querySelectorAll('.cs-collapse-section').forEach(sec => {
+      const header = sec.querySelector('.cs-collapse-header');
+      if (header) {
+        state[header.dataset.section] = !sec.classList.contains('cs-collapsed');
+      }
+    });
+    GM_setValue('cs_collapse', JSON.stringify(state));
+  },
+
+  /**
+   * 从 GM 存储恢复折叠分区状态，若无记录则使用默认（全部折叠）。
+   */
+  _restoreCollapseState() {
+    let saved;
+    try { saved = JSON.parse(GM_getValue('cs_collapse', '{}')); } catch (e) { saved = {}; }
+    const el = this._el;
+    el.querySelectorAll('.cs-collapse-section').forEach(sec => {
+      const header = sec.querySelector('.cs-collapse-header');
+      if (!header) return;
+      const section = header.dataset.section;
+      const body = sec.querySelector('.cs-collapse-body');
+      const arrow = header.querySelector('.cs-collapse-arrow');
+      const isOpen = saved[section] === true;
+      if (isOpen) {
+        sec.classList.remove('cs-collapsed');
+        if (body) body.style.display = '';
+        if (arrow) arrow.innerHTML = '&#9662;';
+      } else {
+        sec.classList.add('cs-collapsed');
+        if (body) body.style.display = 'none';
+        if (arrow) arrow.innerHTML = '&#9656;';
+      }
+    });
   },
 
   _inject() {
@@ -355,6 +372,8 @@ export const Panel = {
           body.style.display = 'none';
           header.querySelector('.cs-collapse-arrow').innerHTML = '&#9656;';
         }
+        // ★ 持久化折叠状态，跨页面保持
+        this._saveCollapseState();
       });
     });
 
@@ -1492,12 +1511,12 @@ function PANEL_HTML(config) {
         </div>
 
         <!-- ── AI 语义分析 ── (可折叠) ───────────────────────────── -->
-        <div class="cs-collapse-section">
+        <div class="cs-collapse-section cs-collapsed">
           <div class="cs-collapse-header" data-section="ai">
-            <span class="cs-collapse-arrow">&#9662;</span>
+            <span class="cs-collapse-arrow">&#9656;</span>
             <span>${t('sectionAI')}</span>
           </div>
-          <div class="cs-collapse-body" data-section="ai">
+          <div class="cs-collapse-body" data-section="ai" style="display:none">
 
         <div class="cs-toggle-row">
           <span class="cs-label">${t('aiMode')}</span>
@@ -1548,12 +1567,12 @@ function PANEL_HTML(config) {
         <div class="cs-divider"></div>
 
         <!-- ── 话题偏好 ── (可折叠) ──────────────────────────────── -->
-        <div class="cs-collapse-section">
+        <div class="cs-collapse-section cs-collapsed">
           <div class="cs-collapse-header" data-section="topic">
-            <span class="cs-collapse-arrow">&#9662;</span>
+            <span class="cs-collapse-arrow">&#9656;</span>
             <span>${t('sectionTopic')}</span>
           </div>
-          <div class="cs-collapse-body" data-section="topic">
+          <div class="cs-collapse-body" data-section="topic" style="display:none">
         <div class="cs-hint" style="margin-bottom:6px">${t('topicDesc')}</div>
         <div id="cs-topic-list" class="cs-topic-list">
           <!-- 由 JS 动态渲染 -->
@@ -1805,16 +1824,16 @@ const PANEL_CSS = `
     top: auto;
     right: auto;
     bottom: auto;
-    width: 280px;
-    min-width: 280px;
+    width: 340px;
+    min-width: 340px;
     z-index: 2147483647;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif !important;
-    font-size: 13px !important;
+    font-size: 15px !important;
     user-select: none;
     background: var(--cs-bg-body) !important;
     color: var(--cs-text) !important;
-    border-radius: 12px;
-    box-shadow: 0 4px 24px var(--cs-shadow);
+    border-radius: 14px;
+    box-shadow: 0 6px 32px var(--cs-shadow);
     border: 1px solid var(--cs-border);
     overflow: hidden;
     display: flex;
@@ -1892,13 +1911,13 @@ const PANEL_CSS = `
     background: var(--cs-bg);
     color: var(--cs-text);
     border-radius: 14px;
-    padding: 14px 16px;
-    width: 280px;
+    padding: 18px 20px;
+    width: 340px;
     box-shadow: 0 6px 30px var(--cs-shadow);
     border: 1px solid var(--cs-border);
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 10px;
     animation: csFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     flex: 1;
     min-height: 0;
@@ -1926,19 +1945,19 @@ const PANEL_CSS = `
   }
 
   .cs-panel-title {
-    font-weight: 700; font-size: 14px;
+    font-weight: 700; font-size: 16px;
     color: var(--cs-accent); letter-spacing: 0.3px;
   }
 
   .cs-panel-badge {
-    font-size: 10px; color: var(--cs-text-secondary);
-    background: var(--cs-bg-body); padding: 1px 6px; border-radius: 8px;
+    font-size: 12px; color: var(--cs-text-secondary);
+    background: var(--cs-bg-body); padding: 2px 8px; border-radius: 8px;
   }
 
   .cs-lang-btn {
     margin-left: auto;
-    padding: 2px 8px;
-    font-size: 10px;
+    padding: 4px 10px;
+    font-size: 12px;
     font-weight: 600;
     border: 1px solid var(--cs-border);
     border-radius: 8px;
@@ -1967,11 +1986,11 @@ const PANEL_CSS = `
 
   .cs-tab {
     flex: 1;
-    padding: 6px 0;
+    padding: 8px 0;
     border: none;
     background: var(--cs-bg-body);
     color: var(--cs-text-secondary);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     cursor: pointer;
     text-align: center;
@@ -1994,17 +2013,17 @@ const PANEL_CSS = `
     background: var(--cs-bg-body);
     border: 1px solid var(--cs-border);
     border-radius: 10px;
-    padding: 10px 12px;
+    padding: 14px 16px;
     display: flex;
     flex-direction: column;
-    gap: 5px;
+    gap: 7px;
   }
 
   .cs-stats-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    font-size: 11px;
+    font-size: 13px;
   }
 
   .cs-stats-label { color: var(--cs-text-secondary); }
@@ -2013,6 +2032,7 @@ const PANEL_CSS = `
     color: var(--cs-text);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
+    font-size: 13px;
   }
 
   .cs-stats-filtered { color: var(--cs-toxic-text); }
@@ -2025,7 +2045,7 @@ const PANEL_CSS = `
   }
 
   .cs-stat-dot {
-    width: 7px; height: 7px;
+    width: 9px; height: 9px;
     border-radius: 50%;
     display: inline-block;
     flex-shrink: 0;
@@ -2055,7 +2075,7 @@ const PANEL_CSS = `
   }
 
   .cs-stat-micro-dot {
-    width: 6px; height: 6px;
+    width: 8px; height: 8px;
     border-radius: 50%;
     display: inline-block;
   }
@@ -2106,40 +2126,41 @@ const PANEL_CSS = `
   }
 
   .cs-scan-hint {
-    font-size: 10px;
+    font-size: 11px;
     color: var(--cs-text-secondary);
-    line-height: 1.3;
-    padding: 2px 0;
+    line-height: 1.4;
+    padding: 3px 0;
   }
 
   /* ── 基础控件 ─────────────────────────────────────────────────── */
 
-  .cs-label { font-size: 13px; color: var(--cs-text); }
-  .cs-label-sm { font-size: 12px; }
+  .cs-label { font-size: 14px; color: var(--cs-text); }
+  .cs-label-sm { font-size: 13px; }
 
   .cs-toggle-row, .cs-select-row {
     display: flex; align-items: center; justify-content: space-between;
+    padding: 2px 0;
   }
 
-  .cs-switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+  .cs-switch { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
   .cs-switch input { opacity: 0; width: 0; height: 0; }
 
   .cs-slider {
     position: absolute; cursor: pointer; inset: 0;
-    background: var(--cs-toggle-bg); border-radius: 20px;
+    background: var(--cs-toggle-bg); border-radius: 22px;
     transition: background 0.25s;
   }
 
   .cs-slider::before {
     content: ''; position: absolute;
-    left: 2px; top: 2px; width: 16px; height: 16px;
+    left: 2px; top: 2px; width: 18px; height: 18px;
     border-radius: 50%; background: #fff;
     transition: transform 0.25s;
     box-shadow: 0 1px 3px rgba(0,0,0,0.15);
   }
 
   .cs-switch input:checked + .cs-slider { background: var(--cs-toggle-on); }
-  .cs-switch input:checked + .cs-slider::before { transform: translateX(16px); }
+  .cs-switch input:checked + .cs-slider::before { transform: translateX(18px); }
   .cs-switch input:disabled + .cs-slider { opacity: 0.5; cursor: not-allowed; }
   .cs-switch input:disabled ~ .cs-slider::before { opacity: 0.6; }
 
@@ -2147,8 +2168,8 @@ const PANEL_CSS = `
     background: var(--cs-input-bg);
     border: 1px solid var(--cs-input-border);
     color: var(--cs-text);
-    border-radius: 6px; padding: 3px 8px;
-    font-size: 12px; max-width: 100px;
+    border-radius: 6px; padding: 5px 10px;
+    font-size: 13px; max-width: 120px;
     outline: none; cursor: pointer;
   }
 
@@ -2163,8 +2184,8 @@ const PANEL_CSS = `
     background: var(--cs-input-bg);
     border: 1px solid var(--cs-input-border);
     color: var(--cs-text);
-    border-radius: 6px; padding: 5px 8px;
-    font-size: 12px; outline: none;
+    border-radius: 6px; padding: 6px 10px;
+    font-size: 13px; outline: none;
     width: 100%; box-sizing: border-box;
   }
 
@@ -2173,20 +2194,20 @@ const PANEL_CSS = `
     box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
   }
 
-  .cs-hint { font-size: 10px; color: var(--cs-text-secondary); line-height: 1.3; }
+  .cs-hint { font-size: 12px; color: var(--cs-text-secondary); line-height: 1.4; }
   .cs-ai-disabled-hint { margin-top: -4px; font-style: italic; opacity: 0.7; }
 
-  .cs-divider { height: 1px; background: var(--cs-divider); margin: 2px 0; }
+  .cs-divider { height: 1px; background: var(--cs-divider); margin: 4px 0; }
 
   .cs-btn-row { display: flex; gap: 6px; }
 
   .cs-btn {
-    flex: 1; padding: 6px 8px;
+    flex: 1; padding: 8px 12px;
     border: 1px solid var(--cs-border) !important;
     border-radius: 8px;
     background: var(--cs-bg-body) !important;
     color: var(--cs-text) !important;
-    cursor: pointer; font-size: 11px;
+    cursor: pointer; font-size: 13px;
     transition: background 0.15s, border-color 0.15s;
     white-space: nowrap;
   }
@@ -2196,8 +2217,8 @@ const PANEL_CSS = `
     border-color: var(--cs-accent) !important;
   }
 
-  .cs-btn-sm { flex: 0 0 auto; padding: 5px 12px; }
-  .cs-btn-xs { flex: 0 0 auto; padding: 2px 8px; font-size: 11px; }
+  .cs-btn-sm { flex: 0 0 auto; padding: 6px 14px; font-size: 12px; }
+  .cs-btn-xs { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; }
   .cs-btn-ghost { background: none; border: none; color: var(--cs-accent); cursor: pointer; }
   .cs-btn-ghost:hover { text-decoration: underline; }
 
@@ -2219,31 +2240,31 @@ const PANEL_CSS = `
   .cs-custom-input-row .cs-input { flex: 1; }
 
   #cs-custom-list {
-    max-height: 120px;
+    max-height: 150px;
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
   }
 
   .cs-custom-empty {
-    font-size: 11px; color: var(--cs-text-secondary);
-    text-align: center; padding: 8px 0;
+    font-size: 13px; color: var(--cs-text-secondary);
+    text-align: center; padding: 10px 0;
   }
 
   .cs-custom-item {
     display: flex; align-items: center; gap: 6px;
-    padding: 4px 8px;
+    padding: 6px 10px;
     background: var(--cs-bg-body);
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 13px;
   }
 
-  .cs-custom-kw { color: var(--cs-text); font-weight: 600; flex-shrink: 0; }
+  .cs-custom-kw { color: var(--cs-text); font-weight: 600; flex-shrink: 0; font-size: 13px; }
 
   .cs-custom-aliases {
     color: var(--cs-text-secondary);
-    font-size: 10px;
+    font-size: 12px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2253,8 +2274,8 @@ const PANEL_CSS = `
   .cs-custom-del {
     background: none; border: none;
     color: var(--cs-text-secondary);
-    cursor: pointer; font-size: 12px;
-    padding: 0 2px; line-height: 1;
+    cursor: pointer; font-size: 14px;
+    padding: 0 4px; line-height: 1;
     flex-shrink: 0; border-radius: 3px;
   }
 
@@ -2267,32 +2288,32 @@ const PANEL_CSS = `
 
   .cs-feed-header {
     display: flex; align-items: center; gap: 6px;
-    font-size: 11px; font-weight: 600;
+    font-size: 13px; font-weight: 600;
     color: var(--cs-text-secondary);
   }
 
   .cs-feed-status {
-    flex: 1; font-size: 10px;
+    flex: 1; font-size: 12px;
     font-weight: 400;
   }
 
   #cs-feed-body {
-    display: flex; flex-direction: column; gap: 3px;
-    max-height: 120px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 4px;
+    max-height: 140px; overflow-y: auto;
   }
 
   .cs-feed-empty {
-    font-size: 11px; color: var(--cs-text-secondary);
-    text-align: center; padding: 8px 0;
+    font-size: 13px; color: var(--cs-text-secondary);
+    text-align: center; padding: 10px 0;
   }
 
   .cs-feed-item {
-    display: flex; align-items: center; gap: 5px;
-    padding: 3px 6px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px;
     border-left: 3px solid #888;
     border-radius: 4px;
     background: var(--cs-entry-bg);
-    font-size: 11px;
+    font-size: 12px;
     animation: csFeedIn 0.25s ease;
   }
 
@@ -2305,18 +2326,18 @@ const PANEL_CSS = `
 
   .cs-feed-user {
     color: var(--cs-accent); font-weight: 600; flex-shrink: 0;
-    max-width: 50px; overflow: hidden;
+    max-width: 60px; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap;
   }
 
   .cs-feed-tag {
-    font-size: 9px; font-weight: 600;
-    padding: 0 4px; border-radius: 6px; flex-shrink: 0;
+    font-size: 11px; font-weight: 600;
+    padding: 1px 6px; border-radius: 6px; flex-shrink: 0;
   }
 
   .cs-feed-type-tag {
-    font-size: 9px; font-weight: 600;
-    padding: 0 4px; border-radius: 6px; flex-shrink: 0;
+    font-size: 11px; font-weight: 600;
+    padding: 1px 6px; border-radius: 6px; flex-shrink: 0;
   }
 
   .cs-feed-text {
@@ -2335,79 +2356,79 @@ const PANEL_CSS = `
 
   .cs-log-title {
     font-weight: 700;
-    font-size: 14px;
+    font-size: 16px;
     color: var(--cs-accent);
   }
 
   .cs-log-count-badge {
-    font-size: 10px;
+    font-size: 12px;
     color: var(--cs-text-secondary);
     background: var(--cs-bg-body);
-    padding: 1px 6px;
+    padding: 2px 8px;
     border-radius: 8px;
   }
 
   #cs-log-list {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     max-height: calc(80vh - 120px);
     overflow-y: auto;
   }
 
   .cs-log-empty {
-    font-size: 12px; color: var(--cs-text-secondary);
-    text-align: center; padding: 20px 0;
+    font-size: 14px; color: var(--cs-text-secondary);
+    text-align: center; padding: 24px 0;
   }
 
   .cs-log-item {
     border: 1px solid var(--cs-entry-border);
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 10px 12px;
     background: var(--cs-entry-bg);
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 5px;
   }
 
   .cs-log-header-row {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
 
   .cs-log-user {
     color: var(--cs-accent);
     font-weight: 600;
-    font-size: 11px;
+    font-size: 13px;
   }
 
   .cs-log-verdict {
-    font-size: 9px; font-weight: 600;
-    padding: 1px 6px; border-radius: 6px;
+    font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 6px;
   }
 
   .cs-log-type {
-    font-size: 9px; font-weight: 600;
-    padding: 1px 6px; border-radius: 6px;
+    font-size: 11px; font-weight: 600;
+    padding: 2px 8px; border-radius: 6px;
   }
 
   .cs-log-time {
     color: var(--cs-text-secondary);
-    font-size: 10px;
+    font-size: 12px;
     margin-left: auto;
   }
 
   .cs-log-text {
     color: var(--cs-text);
-    font-size: 12px;
-    line-height: 1.4;
+    font-size: 13px;
+    line-height: 1.5;
     word-break: break-all;
   }
 
   .cs-log-reason {
     color: var(--cs-text-secondary);
-    font-size: 10px;
+    font-size: 12px;
   }
 
   /* ── 关于页面 ──────────────────────────────────────────────────── */
@@ -2471,17 +2492,17 @@ const PANEL_CSS = `
   /* ── 日志页：复选框 / 已拉黑标记 / 全选行 ─────────────────────── */
 
   .cs-log-check, .cs-log-check-blocked {
-    width: 16px; height: 16px;
+    width: 18px; height: 18px;
     accent-color: var(--cs-accent);
     flex-shrink: 0;
     cursor: pointer;
   }
 
   .cs-blocked-badge {
-    font-size: 9px; font-weight: 600;
+    font-size: 11px; font-weight: 600;
     background: var(--cs-success);
     color: #fff;
-    padding: 1px 6px;
+    padding: 2px 8px;
     border-radius: 8px;
     white-space: nowrap;
     flex-shrink: 0;
@@ -2490,12 +2511,12 @@ const PANEL_CSS = `
   .cs-log-select-all {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
+    gap: 8px;
+    padding: 6px 12px;
     background: var(--cs-bg-body);
     border: 1px solid var(--cs-border);
     border-radius: 8px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--cs-text-secondary);
     cursor: pointer;
@@ -2527,42 +2548,42 @@ const PANEL_CSS = `
 
   .cs-modal-header {
     display: flex; justify-content: space-between; align-items: center;
-    padding: 14px 18px;
+    padding: 16px 20px;
     border-bottom: 1px solid var(--cs-divider);
-    color: var(--cs-text); font-weight: 700; font-size: 14px;
+    color: var(--cs-text); font-weight: 700; font-size: 15px;
   }
 
   .cs-modal-header button {
     background: none; border: none;
     color: var(--cs-text-secondary); cursor: pointer;
-    font-size: 16px; padding: 4px; border-radius: 4px;
+    font-size: 18px; padding: 4px 8px; border-radius: 4px;
   }
 
   .cs-modal-header button:hover { background: var(--cs-bg-body); }
 
   .cs-modal-body {
-    overflow-y: auto; padding: 12px 18px;
-    display: flex; flex-direction: column; gap: 10px;
+    overflow-y: auto; padding: 16px 20px;
+    display: flex; flex-direction: column; gap: 12px;
   }
 
   .cs-entry {
     border: 1px solid var(--cs-entry-border);
-    border-radius: 8px; padding: 10px 12px;
-    display: flex; flex-direction: column; gap: 4px;
+    border-radius: 8px; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 6px;
     background: var(--cs-entry-bg);
   }
 
-  .cs-entry-meta { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+  .cs-entry-meta { display: flex; gap: 10px; align-items: center; font-size: 13px; }
   .cs-entry-user { color: var(--cs-accent); font-weight: 600; }
-  .cs-entry-verdict { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
-  .cs-entry-type { padding: 1px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+  .cs-entry-verdict { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
+  .cs-entry-type { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 600; }
   .cs-verdict-toxic { background: var(--cs-toxic-bg); color: var(--cs-toxic-text); }
   .cs-verdict-suspicious { background: var(--cs-suspicious-bg); color: var(--cs-suspicious-text); }
-  .cs-entry-time { color: var(--cs-text-secondary); margin-left: auto; font-size: 10px; }
-  .cs-entry-text { color: var(--cs-text); font-size: 12px; line-height: 1.4; word-break: break-all; }
-  .cs-entry-url a { color: var(--cs-text-secondary); font-size: 10px; text-decoration: none; opacity: 0.6; }
+  .cs-entry-time { color: var(--cs-text-secondary); margin-left: auto; font-size: 12px; }
+  .cs-entry-text { color: var(--cs-text); font-size: 13px; line-height: 1.5; word-break: break-all; }
+  .cs-entry-url a { color: var(--cs-text-secondary); font-size: 12px; text-decoration: none; opacity: 0.6; }
   .cs-entry-url a:hover { opacity: 1; }
-  .cs-empty { color: var(--cs-text-secondary); text-align: center; padding: 30px 0; font-size: 13px; }
+  .cs-empty { color: var(--cs-text-secondary); text-align: center; padding: 30px 0; font-size: 14px; }
 
   /* ── Rules Modal ───────────────────────────────────────────────── */
   .cs-rules-tabs {
@@ -2572,8 +2593,8 @@ const PANEL_CSS = `
 
   .cs-rules-tab {
     background: none; border: none;
-    padding: 6px 12px; border-radius: 6px;
-    color: var(--cs-text-secondary); font-size: 12px;
+    padding: 8px 14px; border-radius: 6px;
+    color: var(--cs-text-secondary); font-size: 13px;
     cursor: pointer; transition: all 0.2s;
   }
 
@@ -2596,7 +2617,7 @@ const PANEL_CSS = `
 
   .cs-keyword-tag {
     background: var(--cs-bg-body); border: 1px solid var(--cs-border);
-    padding: 4px 10px; border-radius: 12px; font-size: 12px;
+    padding: 5px 12px; border-radius: 12px; font-size: 13px;
     color: var(--cs-text);
   }
 
@@ -2611,7 +2632,7 @@ const PANEL_CSS = `
   }
 
   /* ── AI Semantic Module UI ─────────────────────────────────────── */
-  .cs-select-sm { padding: 4px 8px; font-size: 12px; border-radius: 6px; }
+  .cs-select-sm { padding: 5px 10px; font-size: 13px; border-radius: 6px; }
   .cs-api-field { margin-bottom: 8px; }
   .cs-api-field .cs-label { display: block; margin-bottom: 2px; }
 
@@ -2619,17 +2640,17 @@ const PANEL_CSS = `
   .cs-collapse-section { margin-bottom: 2px; }
   .cs-collapse-header {
     display: flex; align-items: center; gap: 6px;
-    padding: 6px 4px; cursor: pointer;
-    font-size: 12px; font-weight: 600;
+    padding: 8px 4px; cursor: pointer;
+    font-size: 13px; font-weight: 600;
     color: var(--cs-text); user-select: none;
     border-radius: 4px; transition: background 0.15s;
   }
   .cs-collapse-header:hover { background: var(--cs-bg-body); }
   .cs-collapse-arrow {
-    font-size: 10px; color: var(--cs-text-secondary);
-    width: 12px; text-align: center; flex-shrink: 0;
+    font-size: 12px; color: var(--cs-text-secondary);
+    width: 14px; text-align: center; flex-shrink: 0;
   }
-  .cs-collapse-body { padding: 4px 0 2px 0; }
+  .cs-collapse-body { padding: 6px 0 4px 0; }
 
   /* Topic preferences — compact grid */
   .cs-topic-list {
@@ -2702,7 +2723,7 @@ const PANEL_CSS = `
   .cs-entry-risk { font-size: 11px; font-weight: 600; }
 
   /* AI test result */
-  #cs-ai-test-result { font-size: 11px; }
+  #cs-ai-test-result { font-size: 12px; }
 `;
 
 function escapeHtml(str) {

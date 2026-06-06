@@ -43,15 +43,18 @@ import { on } from './src/core/events.js';
   // ─── Bootstrap ──────────────────────────────────────────────────────────────
 
   const CyberShield = {
-    version: '0.6.1',
+    version: '0.7.0',
     config: null,
     platform: null,
     scanner: null,
+    _lastUrl: null,
+    _navTimer: null,
 
     async init() {
       try {
         this.config = await Config.load();
         this.platform = PlatformRegistry.detect();
+        this._lastUrl = location.href;
 
         console.log(`[CyberShield] Initializing on: ${this.platform.name}`);
 
@@ -63,12 +66,17 @@ import { on } from './src/core/events.js';
 
         await this.scanner.start();
 
+        // ── 监听 SPA 页面跳转 ────────────────────────────────────────────
+        this._setupNavigationDetection();
+
         // ── 监听配置变更事件 ────────────────────────────────────────────────
         on('config:updated', (data) => {
           if (data.type === 'customKeywords') {
-            console.log('[CyberShield] Custom keywords changed, syncing detector...');
+            console.log('[CyberShield] Custom keywords changed, re-scanning page...');
             this.scanner.detector.reloadCustomKeywords();
             this.scanner._updateRuleCounts();
+            // 新增：重扫页面以应用新关键词
+            this.scanner.manualScan();
           }
         });
 
@@ -88,9 +96,54 @@ import { on } from './src/core/events.js';
           console.log('[CyberShield] Manual scan triggered by user');
         });
 
+        // ── 监听页面导航事件 ──────────────────────────────────────────────
+        on('navigation:changed', () => {
+          console.log('[CyberShield] Navigation detected, re-scanning...');
+          // 清除旧扫描状态
+          this.scanner._seen = new WeakSet();
+          this.scanner._spamMap = new Map();
+          this.scanner._harassMap = new Map();
+          // 延迟重扫，等待新页面内容加载
+          if (this._navTimer) clearTimeout(this._navTimer);
+          this._navTimer = setTimeout(() => {
+            this.scanner._scanAll();
+            this.scanner._updateRuleCounts();
+          }, 800);
+        });
+
         console.log('[CyberShield] Ready!');
       } catch (err) {
         console.error('[CyberShield] Initialization error:', err);
+      }
+    },
+
+    /**
+     * 检测 SPA 页面跳转（popstate / hashchange / pushState 拦截）
+     */
+    _setupNavigationDetection() {
+      // popstate: 浏览器前进/后退
+      window.addEventListener('popstate', () => this._checkUrlChange());
+
+      // hashchange: 基于 hash 的路由
+      window.addEventListener('hashchange', () => this._checkUrlChange());
+
+      // monkey-patch pushState / replaceState: 拦截 SPA 框架的路由
+      const patchHistoryMethod = (methodName) => {
+        const original = history[methodName];
+        history[methodName] = function (...args) {
+          original.apply(this, args);
+          // 延迟触发，让 URL 先完成更新
+          setTimeout(() => CyberShield._checkUrlChange(), 50);
+        };
+      };
+      patchHistoryMethod('pushState');
+      patchHistoryMethod('replaceState');
+    },
+
+    _checkUrlChange() {
+      if (location.href !== this._lastUrl) {
+        this._lastUrl = location.href;
+        emit('navigation:changed');
       }
     },
   };
