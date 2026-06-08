@@ -2,6 +2,16 @@ import { Evidence } from './evidence.js';
 import { t, toggleLang, getLang } from './i18n.js';
 import { on, emit } from './events.js';
 
+// ── Trusted Types 兼容 ─────────────────────────────────────────────────────────
+// YouTube 等站点启用了 Trusted Types CSP，直接 innerHTML = string 会被拦截。
+// 创建 policy 后可安全赋值；若浏览器不支持 Trusted Types 则原样返回字符串。
+const _ttPolicy = (typeof trustedTypes !== 'undefined')
+  ? trustedTypes.createPolicy('cybershield', { createHTML: s => s })
+  : null;
+function safeHTML(html) {
+  return _ttPolicy ? _ttPolicy.createHTML(html) : html;
+}
+
 export const Panel = {
   _el: null,
   _evidence: null,
@@ -90,7 +100,7 @@ export const Panel = {
 
     console.log(`[CyberShield] Language switched to: ${newLang}`);
     // 重新渲染面板 HTML
-    this._el.innerHTML = PANEL_HTML(this._config);
+    this._el.innerHTML = safeHTML(PANEL_HTML(this._config));
     // 重新绑定事件
     this._bind();
     // 恢复折叠状态（从 GM 存储）
@@ -139,11 +149,11 @@ export const Panel = {
       if (isOpen) {
         sec.classList.remove('cs-collapsed');
         if (body) body.style.display = '';
-        if (arrow) arrow.innerHTML = '&#9662;';
+        if (arrow) arrow.innerHTML = safeHTML('&#9662;');
       } else {
         sec.classList.add('cs-collapsed');
         if (body) body.style.display = 'none';
-        if (arrow) arrow.innerHTML = '&#9656;';
+        if (arrow) arrow.innerHTML = safeHTML('&#9656;');
       }
     });
   },
@@ -153,7 +163,7 @@ export const Panel = {
 
     const el = document.createElement('div');
     el.id = 'cs-panel';
-    el.innerHTML = PANEL_HTML(this._config);
+    el.innerHTML = safeHTML(PANEL_HTML(this._config));
     document.body.appendChild(el);
     this._el = el;
 
@@ -220,9 +230,26 @@ export const Panel = {
       this._updateStatus();
     });
 
-    el.querySelector('#cs-sensitivity').addEventListener('change', (e) => {
-      this._config.sensitivity = e.target.value;
-      this._save();
+    el.querySelectorAll('input[name="cs-sensitivity"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        if (!e.target.checked) return;
+        this._config.sensitivity = e.target.value;
+        this._save();
+        // 更新选中样式
+        const group = el.querySelector('.cs-sens-options');
+        group.querySelectorAll('.cs-sens-option').forEach(opt => opt.classList.remove('active'));
+        const parent = e.target.closest('.cs-sens-option');
+        if (parent) parent.classList.add('active');
+        // 更新折叠栏标题（显示当前灵敏度级别）
+        const header = el.querySelector('.cs-collapse-header[data-section="sensitivity"]');
+        if (header) {
+          const label = e.target.value === 'high' ? t('sensHigh') : e.target.value === 'low' ? t('sensLow') : t('sensMedium');
+          header.innerHTML = safeHTML(`<span class="cs-collapse-arrow">&#9662;</span><span>${t('sensitivity')}: ${label}</span>`);
+        }
+        // 显示/隐藏 HIGH 模式警告
+        const warn = el.querySelector('#cs-high-warning');
+        if (warn) warn.style.display = e.target.value === 'high' ? '' : 'none';
+      });
     });
 
     // ── AI 模式选择器 ─────────────────────────────────────────────────
@@ -249,14 +276,46 @@ export const Panel = {
     el.querySelector('#cs-ai-provider').addEventListener('change', (e) => {
       this._config.aiProvider = e.target.value;
       this._save();
-      // 显示/隐藏自定义端点输入框（openai 和 custom 都需要）
+      // 显示/隐藏端点输入框（Claude 不需要，其他都需要）
       const endpointField = el.querySelector('#cs-ai-endpoint-field');
       if (endpointField) {
-        endpointField.style.display = (e.target.value === 'openai' || e.target.value === 'custom') ? 'block' : 'none';
+        endpointField.style.display = e.target.value !== 'claude' ? 'block' : 'none';
       }
+      // 自动填充预设端点
+      const endpointInput = el.querySelector('#cs-ai-endpoint');
+      const modelInput = el.querySelector('#cs-ai-model');
+      const presetEndpoints = {
+        openai: 'https://api.openai.com/v1/chat/completions',
+        deepseek: 'https://api.deepseek.com/chat/completions',
+        glm: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+        kimi: 'https://api.moonshot.cn/v1/chat/completions',
+        mimo: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions',
+        gemini: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent',
+        openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+      };
+      const presetModels = {
+        openai: 'gpt-4o-mini',
+        deepseek: 'deepseek-chat',
+        glm: 'glm-4-flash',
+        kimi: 'moonshot-v1-8k',
+        mimo: 'mimo-v2-flash',
+        gemini: 'gemini-2.0-flash',
+        openrouter: 'openai/gpt-4o-mini',
+      };
+      if (endpointInput && presetEndpoints[e.target.value]) {
+        endpointInput.value = presetEndpoints[e.target.value];
+        this._config.aiEndpoint = endpointInput.value;
+      }
+      if (modelInput && presetModels[e.target.value]) {
+        modelInput.value = presetModels[e.target.value];
+        this._config.aiModel = modelInput.value;
+      }
+      this._save();
       if (this._scannerRef) {
         this._scannerRef.updateAIConfig({
           aiProvider: this._config.aiProvider,
+          aiEndpoint: this._config.aiEndpoint,
+          aiModel: this._config.aiModel,
         });
       }
     });
@@ -289,16 +348,86 @@ export const Panel = {
       }
     });
 
+    // ── 每日限额 ──────────────────────────────────────────────────
+    el.querySelector('#cs-ai-daily-limit')?.addEventListener('change', (e) => {
+      const val = parseInt(e.target.value, 10);
+      if (val > 0 && val <= 1000) {
+        this._config.aiDailyLimit = val;
+      } else {
+        this._config.aiDailyLimit = 200;
+        e.target.value = 200;
+      }
+      this._save();
+      if (this._scannerRef) {
+        this._scannerRef.updateAIConfig({ aiDailyLimit: this._config.aiDailyLimit });
+      }
+    });
+
     // ── 测试 API Key ─────────────────────────────────────────────────
     el.querySelector('#cs-ai-test-btn')?.addEventListener('click', async () => {
+      const btn = el.querySelector('#cs-ai-test-btn');
       const resultEl = el.querySelector('#cs-ai-test-result');
-      if (resultEl) resultEl.textContent = '...';
+      const dotEl = el.querySelector('#cs-ai-connect-dot');
+
+      // 防止重复点击
+      if (btn?.dataset.testing === '1') return;
+      if (btn) btn.dataset.testing = '1';
+
+      // 点击测试时，先同步读取输入框的值（change 事件在未失焦时不会触发）
+      const endpointInput = el.querySelector('#cs-ai-endpoint');
+      const modelInput = el.querySelector('#cs-ai-model');
+      const apiKeyInput = el.querySelector('#cs-api-key');
+      if (endpointInput) {
+        this._config.aiEndpoint = endpointInput.value.trim();
+      }
+      if (modelInput) {
+        this._config.aiModel = modelInput.value.trim();
+      }
+      if (apiKeyInput) {
+        this._config.apiKey = apiKeyInput.value.trim();
+      }
+      this._save();
       if (this._scannerRef) {
-        const ok = await this._scannerRef.aiAnalyzer.validateKey();
-        if (resultEl) {
-          resultEl.textContent = ok ? t('aiKeyValid') : t('aiKeyInvalid');
-          resultEl.style.color = ok ? 'var(--cs-success)' : 'var(--cs-danger)';
+        this._scannerRef.updateAIConfig({
+          apiKey: this._config.apiKey,
+          aiEndpoint: this._config.aiEndpoint,
+          aiModel: this._config.aiModel,
+        });
+      }
+
+      if (resultEl) resultEl.textContent = '...';
+      if (dotEl) { dotEl.style.display = ''; dotEl.style.background = '#f59e0b'; }
+
+      try {
+        if (this._scannerRef?.aiAnalyzer) {
+          // 添加超时保护，防止 Promise 永远挂起
+          const result = await Promise.race([
+            this._scannerRef.aiAnalyzer.validateKey(),
+            new Promise(resolve => setTimeout(() => resolve({ ok: false, error: 'Request timed out (20s)' }), 20000)),
+          ]);
+          if (resultEl) {
+            if (result.ok) {
+              resultEl.textContent = t('aiKeyValid');
+              resultEl.style.color = 'var(--cs-success)';
+            } else {
+              resultEl.textContent = `${t('aiKeyInvalid')}${result.error ? ': ' + result.error : ''}`;
+              resultEl.style.color = 'var(--cs-danger)';
+            }
+          }
+          if (dotEl) {
+            dotEl.style.background = result.ok ? 'var(--cs-success)' : 'var(--cs-danger)';
+            dotEl.style.boxShadow = result.ok ? '0 0 6px var(--cs-success)' : 'none';
+          }
+          this._updateAIStatusHint();
+        } else {
+          if (resultEl) { resultEl.textContent = t('aiKeyInvalid') + ': Scanner not ready'; resultEl.style.color = 'var(--cs-danger)'; }
+          if (dotEl) { dotEl.style.background = 'var(--cs-danger)'; dotEl.style.boxShadow = 'none'; }
         }
+      } catch (err) {
+        if (resultEl) { resultEl.textContent = `${t('aiKeyInvalid')}: ${err.message}`; resultEl.style.color = 'var(--cs-danger)'; }
+        if (dotEl) { dotEl.style.background = 'var(--cs-danger)'; dotEl.style.boxShadow = 'none'; }
+      } finally {
+        if (btn) btn.dataset.testing = '0';
       }
     });
 
@@ -366,11 +495,11 @@ export const Panel = {
         if (isCollapsed) {
           sectionEl.classList.remove('cs-collapsed');
           body.style.display = '';
-          header.querySelector('.cs-collapse-arrow').innerHTML = '&#9662;';
+          header.querySelector('.cs-collapse-arrow').innerHTML = safeHTML('&#9662;');
         } else {
           sectionEl.classList.add('cs-collapsed');
           body.style.display = 'none';
-          header.querySelector('.cs-collapse-arrow').innerHTML = '&#9656;';
+          header.querySelector('.cs-collapse-arrow').innerHTML = safeHTML('&#9656;');
         }
         // ★ 持久化折叠状态，跨页面保持
         this._saveCollapseState();
@@ -694,22 +823,48 @@ export const Panel = {
   /** 更新 AI 状态提示 */
   _updateAIStatusHint() {
     const hintEl = this._el?.querySelector('#cs-ai-status-hint');
-    if (!hintEl) return;
+    const dotEl = this._el?.querySelector('#cs-ai-connect-dot');
+    const tokenEl = this._el?.querySelector('#cs-ai-token-stats');
 
     if (!this._config.apiKey) {
-      hintEl.textContent = t('aiNoKey');
-      hintEl.style.color = '';
+      if (hintEl) { hintEl.textContent = t('aiNoKey'); hintEl.style.color = ''; }
+      if (dotEl) { dotEl.style.display = 'none'; }
+      if (tokenEl) { tokenEl.style.display = 'none'; }
       return;
     }
 
     if (this._scannerRef?.aiAnalyzer) {
       const status = this._scannerRef.aiAnalyzer.getStatus();
       if (status.isLimitReached) {
-        hintEl.textContent = t('aiLimitReached');
-        hintEl.style.color = 'var(--cs-danger)';
+        if (hintEl) { hintEl.textContent = t('aiLimitReached'); hintEl.style.color = 'var(--cs-danger)'; }
       } else {
-        hintEl.textContent = `${status.provider} / ${status.model}`;
-        hintEl.style.color = 'var(--cs-success)';
+        const providerNames = {
+          claude: 'Claude', openai: 'OpenAI', deepseek: 'DeepSeek',
+          glm: 'GLM', kimi: 'Kimi', gemini: 'Gemini',
+          openrouter: 'OpenRouter', custom: 'Custom',
+        };
+        const pName = providerNames[status.provider] || status.provider;
+        if (hintEl) {
+          hintEl.textContent = status.connected
+            ? `${pName} / ${status.model} ✓`
+            : `${pName} / ${status.model}`;
+          hintEl.style.color = status.connected ? 'var(--cs-success)' : '';
+        }
+      }
+      // 连接状态指示点
+      if (dotEl) {
+        dotEl.style.display = '';
+        dotEl.style.background = status.connected ? 'var(--cs-success)' : 'var(--cs-text-secondary)';
+        dotEl.style.boxShadow = status.connected ? '0 0 6px var(--cs-success)' : 'none';
+      }
+      // Token 统计
+      if (tokenEl && status.totalTokens > 0) {
+        tokenEl.style.display = '';
+        tokenEl.textContent = t('aiTokenStats', {
+          total: status.totalTokens.toLocaleString(),
+          session: status.sessionTokens.toLocaleString(),
+        });
+        tokenEl.style.color = 'var(--cs-text-secondary)';
       }
     }
   },
@@ -764,7 +919,7 @@ export const Panel = {
         </div>
       </div>`;
 
-    container.innerHTML = html;
+    container.innerHTML = safeHTML(html);
 
     // ── 绑定事件：话题复选框 ──────────────────────────────────────
     container.querySelectorAll('.cs-topic-check').forEach(cb => {
@@ -831,33 +986,20 @@ export const Panel = {
     const tf = this._scannerRef?.topicFilter;
     if (!tf) return;
 
-    // 获取话题原始数据
     const topic = tf.topics[topicId];
     if (!topic) return;
     const currentLang = getLang();
     const label = topic.label?.[currentLang] || topic.label?.zh || topic.id;
 
-    // 获取关键词列表
     const zhKeywords = topic.keywords?.zh || [];
     const enKeywords = topic.keywords?.en || [];
 
-    // 从取证记录中统计匹配数 + 获取示例
-    const evidenceLog = this._evidence?.getAll() || [];
-    const matches = evidenceLog.filter(e => {
-      const text = (e.text || '').toLowerCase();
-      const allKws = [...zhKeywords, ...enKeywords];
-      return allKws.some(kw => text.includes(kw.toLowerCase()));
-    });
+    // 从 topicFilter 获取话题专属 AI 学习规则（含真实命中统计）
+    let learnedRules = tf.getAIRules(topicId);
 
-    // 获取 AI 学习规则
-    let learnedRules = [];
-    if (this._scannerRef?.ruleLearner) {
-      const all = this._scannerRef.ruleLearner.getAllRulesDetailed();
-      learnedRules = [...all.keywords, ...all.contextSensitive];
-    }
+    // 从 topicFilter 获取匹配示例
+    let examples = tf.getTopicExamples(topicId);
 
-    // ── 渲染弹窗 HTML ────────────────────────────────────────────
-    const lang = currentLang;
     const sourceText = topic.source === 'user'
       ? t('topicDetailSourceUser')
       : t('topicDetailSourceBuiltin');
@@ -878,7 +1020,6 @@ export const Panel = {
               <span class="cs-topic-detail-kw-count">${t('topicDetailKeywordCount', { n: zhKeywords.length + enKeywords.length })}</span>
             </div>
 
-            <!-- 关键词列表 -->
             <div class="cs-topic-detail-section">
               <div class="cs-topic-detail-section-title">${t('topicDetailKeywords')}</div>
               <div class="cs-topic-detail-tags">`;
@@ -893,26 +1034,19 @@ export const Panel = {
     }
     html += `</div></div>`;
 
-    // 匹配统计
-    html += `
-      <div class="cs-topic-detail-section">
-        <div class="cs-topic-detail-section-title">${t('topicDetailHits')}</div>
-        <div class="cs-topic-detail-stat">${matches.length}</div>
-      </div>`;
-
-    // AI 学习规则
+    // AI 学习规则（含真实命中次数）
     html += `
       <div class="cs-topic-detail-section">
         <div class="cs-topic-detail-section-title">${t('topicDetailAiRules')}</div>`;
     if (learnedRules.length > 0) {
       html += '<ul class="cs-topic-detail-rule-list">';
       learnedRules.slice(0, 15).forEach(r => {
-        const conf = Math.round(r.confidence * 100);
+        const conf = Math.round((r.confidence || 0.85) * 100);
+        const hits = r.hits || 0;
         html += `<li class="cs-topic-detail-rule-item">
           <span class="cs-rule-trigger">${r.trigger}</span>
-          <span class="cs-rule-type">${r.type === 'context_sensitive' ? '🔗' : '🔑'}</span>
-          <span class="cs-rule-conf">${conf}%</span>
-          <span class="cs-rule-hits">${t('topicDetailHits')}: ${r.hitCount || 0}</span>
+          <span class="cs-rule-conf" title="${t('topicDetailHitRate')}">${conf}%</span>
+          <span class="cs-rule-hits">${t('topicDetailAiHitCount', { n: hits })}</span>
         </li>`;
       });
       html += '</ul>';
@@ -921,19 +1055,22 @@ export const Panel = {
     }
     html += `</div>`;
 
-    // 匹配示例
+    // 匹配示例（带清除按钮）
     html += `
       <div class="cs-topic-detail-section">
-        <div class="cs-topic-detail-section-title">${t('topicDetailExamples')}</div>`;
-    if (matches.length > 0) {
+        <div class="cs-topic-detail-section-title">
+          ${t('topicDetailExamples')}
+          ${examples.length > 0 ? `<button class="cs-topic-detail-clear-btn" id="cs-examples-clear-btn" title="${t('topicDetailClearExamples')}">${t('topicDetailClear')}</button>` : ''}
+        </div>`;
+    if (examples.length > 0) {
       html += '<ul class="cs-topic-detail-example-list">';
-      matches.slice(0, 10).forEach(m => {
+      examples.forEach(m => {
         const time = new Date(m.timestamp).toLocaleTimeString(currentLang === 'zh' ? 'zh-CN' : 'en-US', { hour: '2-digit', minute: '2-digit' });
         const excerpt = (m.text || '').slice(0, 80);
         html += `<li class="cs-topic-detail-example-item">
           <span class="cs-example-user">${m.username || '?'}</span>
           <span class="cs-example-time">${time}</span>
-          <span class="cs-example-text">${excerpt}</span>
+          <span class="cs-example-text">${escapeHtml(excerpt)}</span>
         </li>`;
       });
       html += '</ul>';
@@ -945,9 +1082,8 @@ export const Panel = {
         </div>
       </div>`;
 
-    // 插入和绑定
     const overlay = document.createElement('div');
-    overlay.innerHTML = html;
+    overlay.innerHTML = safeHTML(html);
     this._el.appendChild(overlay.firstElementChild);
 
     document.getElementById('cs-topic-detail-close')?.addEventListener('click', () => {
@@ -956,6 +1092,15 @@ export const Panel = {
     });
     document.getElementById('cs-topic-detail-overlay')?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) e.target.remove();
+    });
+
+    // 清除示例按钮
+    document.getElementById('cs-examples-clear-btn')?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (confirm(t('topicDetailClearConfirm'))) {
+        tf.clearTopicExamples(topicId);
+        document.getElementById('cs-topic-detail-overlay')?.remove();
+      }
     });
   },
 
@@ -1058,11 +1203,16 @@ export const Panel = {
       contentType: data.contentType || 'comment',
       uid: data.uid || null,
       timestamp: data.timestamp || Date.now(),
+      layer: data.layer || 1,
+      aiDetected: !!data.aiDetected,
+      aiSummary: data.aiSummary || '',
     });
     // 最多保留20条
     if (this._scanLog.length > 20) {
       this._scanLog.length = 20;
     }
+    // ★ 新数据到达时立即刷新日志 UI（无延迟，防闪烁）
+    this._renderScanLog();
   },
 
   _renderScanLog() {
@@ -1073,7 +1223,7 @@ export const Panel = {
     if (countEl) countEl.textContent = this._scanLog.length;
 
     if (this._scanLog.length === 0) {
-      container.innerHTML = `<div class="cs-log-empty">${t('logEmpty')}</div>`;
+      container.innerHTML = safeHTML(`<div class="cs-log-empty">${t('logEmpty')}</div>`);
       return;
     }
 
@@ -1084,7 +1234,7 @@ export const Panel = {
 
     const hasToxic = this._scanLog.some(e => e.verdict === 'toxic');
 
-    container.innerHTML = [
+    container.innerHTML = safeHTML([
       // "全选" 行 — 仅在有toxic条目时显示
       hasToxic
         ? `<div class="cs-log-select-all">
@@ -1121,14 +1271,15 @@ export const Panel = {
             <span class="cs-log-user">@${escapeHtml(entry.username)}</span>
             <span class="cs-log-type" style="background:${typeColor}15;color:${typeColor}">${typeLabel}</span>
             <span class="cs-log-verdict" style="background:${color}15;color:${color}">${label}</span>
+            ${entry.aiDetected ? `<span class="cs-log-badge cs-log-badge-ai">AI</span>` : `<span class="cs-log-badge cs-log-badge-l${entry.layer}">L${entry.layer}</span>`}
             <span class="cs-log-time">${time}</span>
           </div>
           <div class="cs-log-text">${escapeHtml(entry.text)}</div>
-          ${entry.reason ? `<div class="cs-log-reason">${escapeHtml(entry.reason)}</div>` : ''}
+          ${entry.reason ? `<div class="cs-log-reason">${escapeHtml(entry.reason)}${entry.aiDetected ? ' 🤖' : ''}</div>` : ''}
         </div>
       `;
       }),
-    ].join('');
+    ].join(''));
 
     // 绑定"全选"事件
     const selectAllCheck = container.querySelector('#cs-select-all-check');
@@ -1184,6 +1335,52 @@ export const Panel = {
     emit('config:updated', { type: 'customKeywords' });
   },
 
+  _editCustomKeyword(index) {
+    if (!this._config.customKeywords) return;
+    const entry = this._config.customKeywords[index];
+    if (!entry) return;
+
+    const item = this._el.querySelectorAll('.cs-custom-item')[index];
+    if (!item) return;
+
+    // 替换为编辑表单
+    const aliasesStr = (entry.aliases || []).join(', ');
+    item.innerHTML = safeHTML(`
+      <div class="cs-custom-edit-form" style="display:flex;flex-direction:column;gap:4px;width:100%">
+        <input type="text" class="cs-input cs-edit-kw-input" value="${escapeHtml(entry.keyword)}" placeholder="${t('customEditKeyword')}" style="font-size:13px">
+        <input type="text" class="cs-input cs-edit-alias-input" value="${escapeHtml(aliasesStr)}" placeholder="${t('customEditAliases')}" style="font-size:12px">
+        <div style="display:flex;gap:4px;justify-content:flex-end">
+          <button class="cs-btn cs-btn-xs cs-edit-save-btn">${t('customEditSave')}</button>
+          <button class="cs-btn cs-btn-xs cs-btn-ghost cs-edit-cancel-btn">${t('customEditCancel')}</button>
+        </div>
+      </div>
+    `);
+
+    const saveBtn = item.querySelector('.cs-edit-save-btn');
+    const cancelBtn = item.querySelector('.cs-edit-cancel-btn');
+    const kwInput = item.querySelector('.cs-edit-kw-input');
+    const aliasInput = item.querySelector('.cs-edit-alias-input');
+
+    const doSave = () => {
+      const newKw = kwInput.value.trim();
+      if (!newKw) return;
+      const newAliases = aliasInput.value.split(',').map(s => s.trim()).filter(Boolean);
+      this._config.customKeywords[index] = {
+        keyword: newKw,
+        aliases: newAliases,
+        addedAt: entry.addedAt || Date.now(),
+      };
+      this._save();
+      this._renderCustomKeywords();
+      emit('config:updated', { type: 'customKeywords' });
+    };
+
+    saveBtn.addEventListener('click', doSave);
+    cancelBtn.addEventListener('click', () => this._renderCustomKeywords());
+    kwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); });
+    kwInput.focus();
+  },
+
   _clearAllCustomKeywords() {
     const count = this._config.customKeywords?.length || 0;
     if (count === 0) return;
@@ -1197,32 +1394,56 @@ export const Panel = {
     console.log(`[CyberShield] ${t('customCleared')}`);
   },
 
-  _renderCustomKeywords() {
+  _renderCustomKeywords(filter = '') {
     const container = this._el?.querySelector('#cs-custom-list');
     if (!container) return;
 
     const keywords = this._config.customKeywords || [];
 
     if (keywords.length === 0) {
-      container.innerHTML = `<div class="cs-custom-empty">${t('customEmpty')}</div>`;
+      container.innerHTML = safeHTML(`<div class="cs-custom-empty">${t('customEmpty')}</div>`);
       return;
     }
 
-    container.innerHTML = keywords.map((entry, i) => `
+    const lowerFilter = filter.toLowerCase();
+    const filtered = filter
+      ? keywords.map((entry, i) => ({ entry, i })).filter(({ entry }) =>
+          entry.keyword.toLowerCase().includes(lowerFilter) ||
+          (entry.aliases || []).some(a => a.toLowerCase().includes(lowerFilter))
+        )
+      : keywords.map((entry, i) => ({ entry, i }));
+
+    if (filtered.length === 0) {
+      container.innerHTML = safeHTML(`<div class="cs-custom-empty">${t('customSearchNoResult')}</div>`);
+      return;
+    }
+
+    container.innerHTML = safeHTML(filtered.map(({ entry, i }) => `
       <div class="cs-custom-item">
         <span class="cs-custom-kw">${escapeHtml(entry.keyword)}</span>
         ${entry.aliases && entry.aliases.length > 0
           ? `<span class="cs-custom-aliases">${entry.aliases.map(a => escapeHtml(a)).join(', ')}</span>`
           : ''}
+        <button class="cs-custom-edit" data-index="${i}" title="${t('customEdit')}">&#9998;</button>
         <button class="cs-custom-del" data-index="${i}" title="${t('customDelete')}">x</button>
       </div>
-    `).join('');
+    `).join(''));
 
     container.querySelectorAll('.cs-custom-del').forEach(btn => {
       btn.addEventListener('click', () => {
         this._removeCustomKeyword(parseInt(btn.dataset.index, 10));
       });
     });
+
+    container.querySelectorAll('.cs-custom-edit').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this._editCustomKeyword(parseInt(btn.dataset.index, 10));
+      });
+    });
+  },
+
+  _filterCustomKeywords(filter) {
+    this._renderCustomKeywords(filter);
   },
 
   _exportCustomKeywords() {
@@ -1301,13 +1522,13 @@ export const Panel = {
     const entry = document.createElement('div');
     entry.className = 'cs-feed-item';
     entry.style.borderLeftColor = color;
-    entry.innerHTML = `
+    entry.innerHTML = safeHTML(`
       <span class="cs-feed-dot" style="background:${color}"></span>
       <span class="cs-feed-user">${escapeHtml(data.username || '?')}</span>
       <span class="cs-feed-type-tag" style="background:${typeColor}15;color:${typeColor}">${typeLabel}</span>
       <span class="cs-feed-tag" style="background:${color}15;color:${color}">${label}</span>
       <span class="cs-feed-text">${escapeHtml(data.text.slice(0, 60))}</span>
-    `;
+    `);
 
     container.insertBefore(entry, container.firstChild);
 
@@ -1323,17 +1544,20 @@ export const Panel = {
     const rules = this._scannerRef?.detector?.getAllRules() || {};
     const modal = document.createElement('div');
     modal.id = 'cs-modal';
-    modal.innerHTML = `
+    modal.innerHTML = safeHTML(`
       <div class="cs-modal-inner" style="max-width:800px;height:80vh">
         <div class="cs-modal-header">
           <span>${t('rulesTitle')}</span>
           <button id="cs-modal-close">x</button>
         </div>
         <div class="cs-modal-body" style="display:flex;flex-direction:column;height:100%">
+          <div class="cs-rules-search-row">
+            <input type="text" id="cs-rules-search" class="cs-input" placeholder="${t('rulesSearchPlaceholder')}" style="flex:1;font-size:13px">
+          </div>
           <div class="cs-rules-tabs">
             <button class="cs-rules-tab cs-rules-tab-active" data-tab="hard">${t('rulesHard')} (${rules.hardKeywords?.length || 0})</button>
             <button class="cs-rules-tab" data-tab="soft">${t('rulesSoft')} (${rules.softKeywords?.length || 0})</button>
-            <button class="cs-rules-tab" data-tab="regex">${t('rulesRegex')} (${rules.regexPatterns?.length || 0})</button>
+            <button class="cs-rules-tab" data-tab="regex">${t('rulesRegex')} (${(rules.regexPatterns?.length || 0) + (rules.customRegex?.length || 0)})</button>
             <button class="cs-rules-tab" data-tab="custom">${t('rulesCustom')} (${rules.customKeywords?.length || 0})</button>
           </div>
           <div class="cs-rules-content">
@@ -1345,14 +1569,32 @@ export const Panel = {
             </div>
             <div class="cs-rules-panel" id="cs-rules-regex">
               ${this._renderRegexList(rules.regexPatterns || [])}
+              <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--cs-divider)">
+                <div style="font-size:13px;font-weight:600;margin-bottom:8px;color:var(--cs-text)">${t('rulesCustomRegex')}</div>
+                <div class="cs-rules-custom-toolbar">
+                  <input type="text" id="cs-regex-add-pattern" class="cs-input" placeholder="${t('regexAddPlaceholder')}" style="flex:2;font-size:13px;font-family:monospace">
+                  <input type="text" id="cs-regex-add-flags" class="cs-input" placeholder="${t('regexAddFlags')}" value="i" style="width:40px;font-size:13px;text-align:center">
+                  <input type="text" id="cs-regex-add-desc" class="cs-input" placeholder="${t('regexAddDesc')}" style="flex:1;font-size:13px">
+                  <button id="cs-regex-add-btn" class="cs-btn cs-btn-sm">${t('regexAddBtn')}</button>
+                </div>
+                <div id="cs-rules-regex-custom-list">
+                  ${this._renderCustomRegexList(rules.customRegex || [])}
+                </div>
+              </div>
             </div>
             <div class="cs-rules-panel" id="cs-rules-custom">
-              ${this._renderCustomList(rules.customKeywords || [])}
+              <div class="cs-rules-custom-toolbar">
+                <input type="text" id="cs-rules-custom-add-input" class="cs-input" placeholder="${t('customPlaceholder')}" style="flex:1;font-size:13px">
+                <button id="cs-rules-custom-add-btn" class="cs-btn cs-btn-sm">${t('customAdd')}</button>
+              </div>
+              <div id="cs-rules-custom-list">
+                ${this._renderCustomList(rules.customKeywords || [])}
+              </div>
             </div>
           </div>
         </div>
       </div>
-    `;
+    `);
     document.body.appendChild(modal);
 
     // Close handlers
@@ -1368,6 +1610,207 @@ export const Panel = {
         modal.querySelector(`#cs-rules-${tab.dataset.tab}`).classList.add('cs-rules-panel-active');
       });
     });
+
+    // ── 自定义正则：添加 ──────────────────────────────────────────
+    const regexAddPattern = modal.querySelector('#cs-regex-add-pattern');
+    const regexAddFlags = modal.querySelector('#cs-regex-add-flags');
+    const regexAddDesc = modal.querySelector('#cs-regex-add-desc');
+    const regexAddBtn = modal.querySelector('#cs-regex-add-btn');
+    const doAddRegex = () => {
+      const pattern = regexAddPattern?.value?.trim();
+      if (!pattern) return;
+      const flags = regexAddFlags?.value?.trim() || 'i';
+      const desc = regexAddDesc?.value?.trim() || '';
+      // 验证正则
+      try {
+        new RegExp(pattern, flags);
+      } catch (e) {
+        alert(t('regexInvalid') + ': ' + e.message);
+        return;
+      }
+      if (!this._config.customRegex) this._config.customRegex = [];
+      const exists = this._config.customRegex.some(e => e.pattern === pattern);
+      if (exists) {
+        alert(t('regexExists'));
+        return;
+      }
+      this._config.customRegex.push({ pattern, flags, description: desc, addedAt: Date.now() });
+      this._save();
+      emit('config:updated', { type: 'customRegex' });
+      regexAddPattern.value = '';
+      regexAddDesc.value = '';
+      this._refreshRulesRegexList(modal);
+    };
+    regexAddBtn?.addEventListener('click', doAddRegex);
+    regexAddPattern?.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAddRegex(); });
+
+    // ── 自定义正则：删除（事件委托） ──────────────────────────────
+    const regexCustomList = modal.querySelector('#cs-rules-regex-custom-list');
+    regexCustomList?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cs-regex-del-btn');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.index, 10);
+      if (isNaN(idx)) return;
+      const entry = this._config.customRegex?.[idx];
+      if (!entry) return;
+      if (!confirm(t('regexDelConfirm', { pattern: entry.pattern }))) return;
+      this._config.customRegex.splice(idx, 1);
+      this._save();
+      emit('config:updated', { type: 'customRegex' });
+      this._refreshRulesRegexList(modal);
+    });
+
+    // ── 自定义关键词：添加 ──────────────────────────────────────────
+    const customAddInput = modal.querySelector('#cs-rules-custom-add-input');
+    const customAddBtn = modal.querySelector('#cs-rules-custom-add-btn');
+    const doAddInModal = () => {
+      const val = customAddInput?.value?.trim();
+      if (!val) return;
+      if (!this._config.customKeywords) this._config.customKeywords = [];
+      const exists = this._config.customKeywords.some(e => e.keyword.toLowerCase() === val.toLowerCase());
+      if (exists) { customAddInput.value = ''; return; }
+      const aliases = [];
+      const lower = val.toLowerCase().replace(/\s+/g, '');
+      if (lower !== val) aliases.push(lower);
+      this._config.customKeywords.push({ keyword: val, aliases, addedAt: Date.now() });
+      this._save();
+      emit('config:updated', { type: 'customKeywords' });
+      customAddInput.value = '';
+      this._refreshRulesCustomList(modal);
+      this._renderCustomKeywords();
+    };
+    customAddBtn?.addEventListener('click', doAddInModal);
+    customAddInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') doAddInModal(); });
+
+    // ── 自定义关键词：编辑 & 删除（事件委托） ────────────────────────
+    const customList = modal.querySelector('#cs-rules-custom-list');
+    customList?.addEventListener('click', (e) => {
+      const btn = e.target.closest('.cs-custom-edit, .cs-custom-del');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.index, 10);
+      if (isNaN(idx)) return;
+
+      if (btn.classList.contains('cs-custom-del')) {
+        // 删除
+        if (!confirm(t('customDelConfirm', { keyword: this._config.customKeywords?.[idx]?.keyword || '' }))) return;
+        this._config.customKeywords.splice(idx, 1);
+        this._save();
+        emit('config:updated', { type: 'customKeywords' });
+        this._refreshRulesCustomList(modal);
+        this._renderCustomKeywords();
+      } else if (btn.classList.contains('cs-custom-edit')) {
+        // 编辑 - 行内替换
+        const entry = this._config.customKeywords[idx];
+        if (!entry) return;
+        const item = btn.closest('.cs-custom-item');
+        if (!item) return;
+        const aliasesStr = (entry.aliases || []).join(', ');
+        item.innerHTML = safeHTML(`
+          <div class="cs-custom-edit-form" style="display:flex;flex-direction:column;gap:4px;width:100%">
+            <input type="text" class="cs-input cs-edit-kw-input" value="${escapeHtml(entry.keyword)}" placeholder="${t('customEditKeyword')}" style="font-size:13px">
+            <input type="text" class="cs-input cs-edit-alias-input" value="${escapeHtml(aliasesStr)}" placeholder="${t('customEditAliases')}" style="font-size:12px">
+            <div style="display:flex;gap:4px;justify-content:flex-end">
+              <button class="cs-btn cs-btn-xs cs-edit-save-btn">${t('customEditSave')}</button>
+              <button class="cs-btn cs-btn-xs cs-btn-ghost cs-edit-cancel-btn">${t('customEditCancel')}</button>
+            </div>
+          </div>
+        `);
+        const saveBtn = item.querySelector('.cs-edit-save-btn');
+        const cancelBtn = item.querySelector('.cs-edit-cancel-btn');
+        const kwInput = item.querySelector('.cs-edit-kw-input');
+        const aliasInput = item.querySelector('.cs-edit-alias-input');
+
+        const doSave = () => {
+          const newKw = kwInput.value.trim();
+          if (!newKw) return;
+          const newAliases = aliasInput.value.split(',').map(s => s.trim()).filter(Boolean);
+          this._config.customKeywords[idx] = {
+            keyword: newKw,
+            aliases: newAliases,
+            addedAt: entry.addedAt || Date.now(),
+          };
+          this._save();
+          emit('config:updated', { type: 'customKeywords' });
+          this._refreshRulesCustomList(modal);
+          this._renderCustomKeywords();
+        };
+
+        saveBtn.addEventListener('click', doSave);
+        cancelBtn.addEventListener('click', () => this._refreshRulesCustomList(modal));
+        kwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); });
+        kwInput.focus();
+      }
+    });
+
+    // Search functionality
+    const searchInput = modal.querySelector('#cs-rules-search');
+    searchInput?.addEventListener('input', (e) => {
+      const filter = e.target.value.trim().toLowerCase();
+      const activePanel = modal.querySelector('.cs-rules-panel-active');
+      if (!activePanel) return;
+
+      if (!filter) {
+        activePanel.querySelectorAll('.cs-keyword-tag, .cs-regex-item, .cs-custom-item').forEach(el => {
+          el.style.display = '';
+        });
+        activePanel.querySelectorAll('.cs-rules-no-result').forEach(el => el.remove());
+        return;
+      }
+
+      let hasVisible = false;
+      activePanel.querySelectorAll('.cs-keyword-tag').forEach(el => {
+        const match = el.textContent.toLowerCase().includes(filter);
+        el.style.display = match ? '' : 'none';
+        if (match) hasVisible = true;
+      });
+      activePanel.querySelectorAll('.cs-regex-item').forEach(el => {
+        const match = el.textContent.toLowerCase().includes(filter);
+        el.style.display = match ? '' : 'none';
+        if (match) hasVisible = true;
+      });
+      activePanel.querySelectorAll('.cs-custom-item').forEach(el => {
+        const match = el.textContent.toLowerCase().includes(filter);
+        el.style.display = match ? '' : 'none';
+        if (match) hasVisible = true;
+      });
+
+      const existingNoResult = activePanel.querySelector('.cs-rules-no-result');
+      if (!hasVisible) {
+        if (!existingNoResult) {
+          const noResult = document.createElement('p');
+          noResult.className = 'cs-rules-no-result cs-empty';
+          noResult.textContent = t('rulesSearchNoResult');
+          activePanel.appendChild(noResult);
+        }
+      } else {
+        if (existingNoResult) existingNoResult.remove();
+      }
+    });
+  },
+
+  /** 刷新规则弹窗中的自定义关键词列表 */
+  _refreshRulesCustomList(modal) {
+    const listEl = modal.querySelector('#cs-rules-custom-list');
+    if (!listEl) return;
+    const rules = this._scannerRef?.detector?.getAllRules() || {};
+    listEl.innerHTML = safeHTML(this._renderCustomList(rules.customKeywords || []));
+    // 更新 tab 计数
+    const tab = modal.querySelector('.cs-rules-tab[data-tab="custom"]');
+    if (tab) tab.textContent = `${t('rulesCustom')} (${rules.customKeywords?.length || 0})`;
+  },
+
+  /** 刷新规则弹窗中的自定义正则列表 */
+  _refreshRulesRegexList(modal) {
+    const listEl = modal.querySelector('#cs-rules-regex-custom-list');
+    if (!listEl) return;
+    const rules = this._scannerRef?.detector?.getAllRules() || {};
+    listEl.innerHTML = safeHTML(this._renderCustomRegexList(rules.customRegex || []));
+    // 更新内置正则列表
+    const builtinList = modal.querySelector('#cs-rules-regex .cs-regex-list');
+    if (builtinList) builtinList.innerHTML = safeHTML(this._renderRegexList(rules.regexPatterns || []));
+    // 更新 tab 计数
+    const tab = modal.querySelector('.cs-rules-tab[data-tab="regex"]');
+    if (tab) tab.textContent = `${t('rulesRegex')} (${(rules.regexPatterns?.length || 0) + (rules.customRegex?.length || 0)})`;
   },
 
   _showEvidenceModal() {
@@ -1379,7 +1822,7 @@ export const Panel = {
     const riskColors = { safe: '#22c55e', low: '#f59e0b', medium: '#f59e0b', high: '#ef4444' };
     const modal = document.createElement('div');
     modal.id = 'cs-modal';
-    modal.innerHTML = `
+    modal.innerHTML = safeHTML(`
       <div class="cs-modal-inner">
         <div class="cs-modal-header">
           <span>${t('modalTitle')}</span>
@@ -1424,7 +1867,7 @@ export const Panel = {
           }
         </div>
       </div>
-    `;
+    `);
     document.body.appendChild(modal);
 
     // 关闭按钮
@@ -1455,17 +1898,30 @@ export const Panel = {
 
   _renderRegexList(patterns) {
     if (!patterns || patterns.length === 0) return `<p class="cs-empty">${t('emptyLog')}</p>`;
-    return `<div class="cs-regex-list">${patterns.map(p => `<code class="cs-regex-item">${escapeHtml(p)}</code>`).join('')}</div>`;
+    return `<div class="cs-regex-list">${patterns.map(p => `<div class="cs-regex-item-row"><code class="cs-regex-item">${escapeHtml(p)}</code><span class="cs-regex-builtin-tag">${t('regexDescBuiltin')}</span></div>`).join('')}</div>`;
+  },
+
+  _renderCustomRegexList(customs) {
+    if (!customs || customs.length === 0) return `<p class="cs-empty" style="font-size:13px;padding:8px 0">${t('customEmpty')}</p>`;
+    return customs.map((entry, i) => `
+      <div class="cs-regex-custom-item" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--cs-bg-body);border-radius:6px;margin-bottom:6px">
+        <code style="flex:1;font-size:12px;color:var(--cs-text);word-break:break-all;font-family:monospace">/${escapeHtml(entry.pattern)}/${escapeHtml(entry.flags || 'i')}</code>
+        ${entry.description ? `<span style="font-size:12px;color:var(--cs-text-secondary);flex-shrink:0">${escapeHtml(entry.description)}</span>` : ''}
+        <button class="cs-regex-del-btn cs-rules-action-btn" data-index="${i}" title="${t('customDelete')}">x</button>
+      </div>
+    `).join('');
   },
 
   _renderCustomList(customs) {
     if (!customs || customs.length === 0) return `<p class="cs-empty">${t('customEmpty')}</p>`;
-    return customs.map(entry => `
-      <div class="cs-custom-item">
+    return customs.map((entry, i) => `
+      <div class="cs-custom-item" data-index="${i}">
         <span class="cs-custom-kw">${escapeHtml(entry.keyword)}</span>
         ${entry.aliases && entry.aliases.length > 0
           ? `<span class="cs-custom-aliases">${entry.aliases.map(a => escapeHtml(a)).join(', ')}</span>`
           : ''}
+        <button class="cs-custom-edit cs-rules-action-btn" data-index="${i}" title="${t('customEdit')}">&#9998;</button>
+        <button class="cs-custom-del cs-rules-action-btn" data-index="${i}" title="${t('customDelete')}">x</button>
       </div>
     `).join('');
   },
@@ -1636,15 +2092,6 @@ function PANEL_HTML(config) {
           </label>
         </div>
 
-        <div class="cs-select-row">
-          <span class="cs-label">${t('sensitivity')}</span>
-          <select id="cs-sensitivity" class="cs-select">
-            <option value="low"    ${config.sensitivity === 'low'    ? 'selected' : ''}>${t('low')}</option>
-            <option value="medium" ${config.sensitivity === 'medium' ? 'selected' : ''}>${t('medium')}</option>
-            <option value="high"   ${config.sensitivity === 'high'   ? 'selected' : ''}>${t('high')}</option>
-          </select>
-        </div>
-
         <div class="cs-toggle-row">
           <span class="cs-label">${t('autoBlock')}</span>
           <label class="cs-switch">
@@ -1655,6 +2102,34 @@ function PANEL_HTML(config) {
 
           </div>
         </div>
+
+        <!-- ── 防护灵敏度 ── (可折叠) ───────────────────────────── -->
+        <div class="cs-collapse-section">
+          <div class="cs-collapse-header" data-section="sensitivity">
+            <span class="cs-collapse-arrow">&#9662;</span>
+            <span>${t('sensitivity')}: ${config.sensitivity === 'high' ? t('sensHigh') : config.sensitivity === 'low' ? t('sensLow') : t('sensMedium')}</span>
+          </div>
+          <div class="cs-collapse-body" data-section="sensitivity">
+            <div class="cs-sens-options">
+              <label class="cs-sens-option ${config.sensitivity === 'low' ? 'active' : ''}" data-value="low">
+                <input type="radio" name="cs-sensitivity" value="low" ${config.sensitivity === 'low' ? 'checked' : ''}>
+                <span class="cs-sens-label">${t('sensLow')}</span>
+                <span class="cs-sens-desc">${t('sensLowDesc')}</span>
+              </label>
+              <label class="cs-sens-option ${config.sensitivity === 'medium' || !config.sensitivity ? 'active' : ''}" data-value="medium">
+                <input type="radio" name="cs-sensitivity" value="medium" ${config.sensitivity === 'medium' || !config.sensitivity ? 'checked' : ''}>
+                <span class="cs-sens-label">${t('sensMedium')}</span>
+                <span class="cs-sens-desc">${t('sensMediumDesc')}</span>
+              </label>
+              <label class="cs-sens-option ${config.sensitivity === 'high' ? 'active' : ''}" data-value="high">
+                <input type="radio" name="cs-sensitivity" value="high" ${config.sensitivity === 'high' ? 'checked' : ''}>
+                <span class="cs-sens-label">${t('sensHigh')}</span>
+                <span class="cs-sens-desc">${t('sensHighDesc')}</span>
+              </label>
+            </div>
+            <div id="cs-high-warning" style="display:${config.sensitivity === 'high' ? '' : 'none'};margin-top:6px;font-size:12px;color:#ef4444;padding:6px 8px;background:#fef2f2;border-radius:6px">${t('sensHighWarning')}</div>
+          </div>
+        </div>   <!-- end sensitivity section -->
 
         <!-- ── AI 语义分析 ── (可折叠) ───────────────────────────── -->
         <div class="cs-collapse-section cs-collapsed">
@@ -1683,6 +2158,12 @@ function PANEL_HTML(config) {
             <select id="cs-ai-provider" class="cs-select cs-select-sm">
               <option value="claude" ${(!config.aiProvider || config.aiProvider === 'claude') ? 'selected' : ''}>${t('aiProviderClaude')}</option>
               <option value="openai" ${config.aiProvider === 'openai' ? 'selected' : ''}>${t('aiProviderOpenAI')}</option>
+              <option value="deepseek" ${config.aiProvider === 'deepseek' ? 'selected' : ''}>${t('aiProviderDeepSeek')}</option>
+              <option value="mimo" ${config.aiProvider === 'mimo' ? 'selected' : ''}>${t('aiProviderMimo')}</option>
+              <option value="glm" ${config.aiProvider === 'glm' ? 'selected' : ''}>${t('aiProviderGLM')}</option>
+              <option value="kimi" ${config.aiProvider === 'kimi' ? 'selected' : ''}>${t('aiProviderKimi')}</option>
+              <option value="gemini" ${config.aiProvider === 'gemini' ? 'selected' : ''}>${t('aiProviderGemini')}</option>
+              <option value="openrouter" ${config.aiProvider === 'openrouter' ? 'selected' : ''}>${t('aiProviderOpenRouter')}</option>
               <option value="custom" ${config.aiProvider === 'custom' ? 'selected' : ''}>${t('aiProviderCustom')}</option>
             </select>
           </div>
@@ -1690,7 +2171,7 @@ function PANEL_HTML(config) {
             <span class="cs-label cs-label-sm">${t('apiKey')}</span>
             <input type="password" id="cs-api-key" class="cs-input" placeholder="${t('apiKeyPlaceholder')}" value="${config.apiKey || ''}">
           </div>
-          <div class="cs-api-field" id="cs-ai-endpoint-field" style="display:${(config.aiProvider === 'openai' || config.aiProvider === 'custom') ? 'block' : 'none'}">
+          <div class="cs-api-field" id="cs-ai-endpoint-field" style="display:${config.aiProvider && config.aiProvider !== 'claude' ? 'block' : 'none'}">
             <span class="cs-label cs-label-sm">${t('aiEndpoint')}</span>
             <input type="text" id="cs-ai-endpoint" class="cs-input" placeholder="${t('aiEndpointPlaceholder')}" value="${config.aiEndpoint || ''}">
           </div>
@@ -1698,10 +2179,16 @@ function PANEL_HTML(config) {
             <span class="cs-label cs-label-sm">${t('aiModel')}</span>
             <input type="text" id="cs-ai-model" class="cs-input" placeholder="${t('aiModelPlaceholder')}" value="${config.aiModel || ''}">
           </div>
+          <div class="cs-api-field">
+            <span class="cs-label cs-label-sm">${t('aiDailyLimitLabel')}</span>
+            <input type="number" id="cs-ai-daily-limit" class="cs-input cs-input-narrow" min="1" max="1000" value="${config.aiDailyLimit || 200}" style="width:80px">
+          </div>
           <div class="cs-api-field" style="display:flex;align-items:center;gap:8px;margin-top:4px">
             <button id="cs-ai-test-btn" class="cs-btn cs-btn-xs">${t('aiTestBtn')}</button>
             <span id="cs-ai-test-result" class="cs-hint" style="margin:0"></span>
+            <span id="cs-ai-connect-dot" class="cs-dot" style="width:8px;height:8px;border-radius:50%;flex-shrink:0;display:none"></span>
           </div>
+          <div id="cs-ai-token-stats" class="cs-hint" style="margin-top:2px;display:none"></div>
           <div id="cs-ai-status-hint" class="cs-hint" style="margin-top:4px">
             ${!config.apiKey ? t('aiNoKey') : ''}
           </div>
@@ -1777,26 +2264,9 @@ function PANEL_HTML(config) {
         <div class="cs-collapse-section cs-collapsed">
           <div class="cs-collapse-header" data-section="rules">
             <span class="cs-collapse-arrow">&#9656;</span>
-            <span>${t('sectionRules')}</span>
+            <span>${t('sectionRulesCustom')}</span>
           </div>
           <div class="cs-collapse-body" data-section="rules" style="display:none">
-        <div id="cs-rules-view-area">
-          <div style="display:flex;justify-content:flex-start;margin-bottom:4px">
-            <button id="cs-rules-view-btn" class="cs-btn cs-btn-xs cs-btn-ghost">${t('view')}</button>
-          </div>
-        </div>
-          </div>
-        </div>
-
-        <div class="cs-divider"></div>
-
-        <!-- ── 自定义关键词 ── (可折叠) ─────────────────────────────── -->
-        <div class="cs-collapse-section cs-collapsed">
-          <div class="cs-collapse-header" data-section="custom">
-            <span class="cs-collapse-arrow">&#9656;</span>
-            <span>${t('sectionCustom')}</span>
-          </div>
-          <div class="cs-collapse-body" data-section="custom" style="display:none">
         <div class="cs-custom-input-row">
           <input type="text" id="cs-custom-input" class="cs-input" placeholder="${t('customPlaceholder')}">
           <button id="cs-custom-add-btn" class="cs-btn cs-btn-sm">${t('customAdd')}</button>
@@ -1805,6 +2275,7 @@ function PANEL_HTML(config) {
           <div class="cs-custom-empty">${t('customEmpty')}</div>
         </div>
         <div class="cs-btn-row">
+          <button id="cs-rules-view-btn" class="cs-btn cs-btn-xs cs-btn-ghost">${t('view')}</button>
           <button id="cs-custom-clear-btn" class="cs-btn">${t('customClearAll')}</button>
           <button id="cs-custom-import-btn" class="cs-btn">${t('customImport')}</button>
           <button id="cs-custom-export-btn" class="cs-btn">${t('customExport')}</button>
@@ -1847,6 +2318,27 @@ function PANEL_HTML(config) {
           <h3 class="cs-about-title">${t('aboutText', { ver: '0.6.1' })}</h3>
           <p class="cs-about-text">${t('aboutDesc')}</p>
         </div>
+
+        <!-- ── 快速上手 ──────────────────────────────────────────── -->
+        <div class="cs-about-section">
+          <h4 class="cs-about-subtitle">${t('guideTitle')}</h4>
+          <div class="cs-guide-block">
+            <div class="cs-guide-item">
+              <span class="cs-guide-label">${t('guideSens')}</span>
+              <span class="cs-guide-desc">${t('guideSensDesc')}</span>
+            </div>
+            <div class="cs-guide-item">
+              <span class="cs-guide-label">${t('guideAI')}</span>
+              <span class="cs-guide-desc">${t('guideAIDesc')}</span>
+            </div>
+            <div class="cs-guide-item">
+              <span class="cs-guide-label">${t('guideLayers')}</span>
+              <span class="cs-guide-desc">${t('guideLayersDesc')}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="cs-divider"></div>
 
         <div class="cs-about-section">
           <h4 class="cs-about-subtitle">${t('privacyTitle')}</h4>
@@ -2079,6 +2571,25 @@ const PANEL_CSS = `
     display: flex;
     flex-direction: column;
     gap: 8px;
+    scrollbar-gutter: stable;
+  }
+
+  #cs-content::-webkit-scrollbar {
+    width: 5px;
+  }
+  #cs-content::-webkit-scrollbar-track {
+    background: transparent;
+    margin: 4px 0;
+  }
+  #cs-content::-webkit-scrollbar-thumb {
+    background: rgba(128, 128, 128, 0.2);
+    border-radius: 10px;
+    border: 1px solid transparent;
+    background-clip: content-box;
+  }
+  #cs-content::-webkit-scrollbar-thumb:hover {
+    background: rgba(128, 128, 128, 0.4);
+    background-clip: content-box;
   }
 
   @keyframes csFadeIn {
@@ -2288,6 +2799,47 @@ const PANEL_CSS = `
     padding: 2px 0;
   }
 
+  /* ── 三档灵敏度选项（垂直排列）────────────────────────────────── */
+  .cs-sens-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .cs-sens-option {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    cursor: pointer;
+    border: 1px solid var(--cs-border, #e5e7eb);
+    border-radius: 8px;
+    transition: all 0.15s;
+    user-select: none;
+    background: var(--cs-bg-secondary, #f9fafb);
+  }
+  .cs-sens-option input { display: none; }
+  .cs-sens-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cs-text, #333);
+    line-height: 1.4;
+  }
+  .cs-sens-desc {
+    font-size: 12px;
+    color: var(--cs-text-secondary, #888);
+  }
+  .cs-sens-option:hover {
+    border-color: var(--cs-accent, #2563eb);
+    background: var(--cs-accent-10, rgba(37,99,235,0.05));
+  }
+  .cs-sens-option.active {
+    background: var(--cs-accent, #2563eb);
+    border-color: var(--cs-accent, #2563eb);
+  }
+  .cs-sens-option.active .cs-sens-label { color: #fff; }
+  .cs-sens-option.active .cs-sens-desc { color: rgba(255,255,255,0.85); }
+
   .cs-switch { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
   .cs-switch input { opacity: 0; width: 0; height: 0; }
 
@@ -2428,6 +2980,19 @@ const PANEL_CSS = `
   .cs-custom-del:hover {
     color: var(--cs-toxic-text);
     background: var(--cs-toxic-bg);
+  }
+
+  .cs-custom-edit {
+    background: none; border: none;
+    color: var(--cs-text-secondary);
+    cursor: pointer; font-size: 13px;
+    padding: 0 4px; line-height: 1;
+    flex-shrink: 0; border-radius: 3px;
+  }
+
+  .cs-custom-edit:hover {
+    color: var(--cs-accent);
+    background: var(--cs-bg-body);
   }
 
   /* ── 迷你 Feed 预览 ───────────────────────────────────────────── */
@@ -2577,6 +3142,23 @@ const PANEL_CSS = `
     font-size: 12px;
   }
 
+  /* ── 扫描日志层级/AI 标签 ────────────────────────────────────────── */
+
+  .cs-log-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.4;
+    margin-left: 6px;
+  }
+
+  .cs-log-badge-l1 { background: #ef444415; color: #ef4444; }
+  .cs-log-badge-l2 { background: #f59e0b15; color: #f59e0b; }
+  .cs-log-badge-ai { background: #2563eb15; color: #2563eb; }
+
   /* ── 关于页面 ──────────────────────────────────────────────────── */
 
   .cs-about-section {
@@ -2602,6 +3184,33 @@ const PANEL_CSS = `
     color: var(--cs-text-secondary);
     line-height: 1.5;
     margin-bottom: 8px;
+  }
+
+  /* ── 快速上手引导块 ──────────────────────────────────────────────── */
+  .cs-guide-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .cs-guide-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    background: var(--cs-bg-secondary, #f9fafb);
+    border: 1px solid var(--cs-border, #e5e7eb);
+    border-radius: 8px;
+  }
+  .cs-guide-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--cs-accent, #2563eb);
+  }
+  .cs-guide-desc {
+    font-size: 12px;
+    color: var(--cs-text-secondary, #6b7280);
+    line-height: 1.5;
   }
 
   .cs-about-list {
@@ -2732,6 +3341,34 @@ const PANEL_CSS = `
   .cs-empty { color: var(--cs-text-secondary); text-align: center; padding: 30px 0; font-size: 14px; }
 
   /* ── Rules Modal ───────────────────────────────────────────────── */
+  .cs-rules-search-row {
+    display: flex; gap: 8px; padding: 12px 18px 0;
+  }
+
+  .cs-rules-custom-toolbar {
+    display: flex; gap: 6px; margin-bottom: 10px;
+  }
+
+  .cs-rules-action-btn {
+    background: none; border: none;
+    color: var(--cs-text-secondary);
+    cursor: pointer; font-size: 13px;
+    padding: 0 4px; line-height: 1;
+    flex-shrink: 0; border-radius: 3px;
+    opacity: 0.6;
+    transition: opacity 0.15s, color 0.15s;
+  }
+  .cs-rules-action-btn:hover {
+    opacity: 1;
+  }
+  .cs-custom-edit.cs-rules-action-btn:hover {
+    color: var(--cs-accent);
+  }
+  .cs-custom-del.cs-rules-action-btn:hover {
+    color: var(--cs-toxic-text);
+    background: var(--cs-toxic-bg);
+  }
+
   .cs-rules-tabs {
     display: flex; gap: 8px; padding: 12px 18px;
     border-bottom: 1px solid var(--cs-divider);
@@ -2768,13 +3405,23 @@ const PANEL_CSS = `
   }
 
   .cs-regex-list {
-    display: flex; flex-direction: column; gap: 8px;
+    display: flex; flex-wrap: wrap; gap: 6px;
   }
 
   .cs-regex-item {
     background: var(--cs-bg-body); border: 1px solid var(--cs-border);
-    padding: 8px 12px; border-radius: 6px; font-family: monospace;
-    font-size: 11px; color: var(--cs-text); word-break: break-all;
+    padding: 5px 12px; border-radius: 12px; font-size: 13px;
+    color: var(--cs-text);
+  }
+
+  .cs-regex-item-row {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .cs-regex-builtin-tag {
+    font-size: 10px; color: var(--cs-text-secondary);
+    background: var(--cs-bg-body); padding: 2px 6px;
+    border-radius: 4px; flex-shrink: 0;
+    border: 1px solid var(--cs-border);
   }
 
   /* ── AI Semantic Module UI ─────────────────────────────────────── */

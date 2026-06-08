@@ -1,134 +1,81 @@
 /**
- * ai.js — Layer 3: AI 语义检测模块（升级版）
+ * ai.js — Layer 3: Claude AI 检测模块
  *
- * 职责：
- *   - 封装多 Provider AI API 调用（Claude / OpenAI / 自定义）
- *   - 三档 AI 模式：off / eco（默认）/ full
- *   - 批处理队列 + 每日调用上限 + 自动降级
- *   - 升级输出契约：intent + learned_rule
- *   - 话题过滤集成（路由条件判断）
- *   - 无 API Key 时优雅降级（A8）
+ * 职责：封装 Claude API 调用，提供统一的 async analyze() 接口。
+ * 后续扩展：批处理队列、每日调用上限、规则晋升触发。
  */
 
-import { createProvider } from './ai-providers/index.js';
+// ─── 默认 Prompt 模板 ──────────────────────────────────────────────────────────
 
-// ─── AI 模式定义 ──────────────────────────────────────────────────────────────
+const DEFAULT_SYSTEM_PROMPT = `你正在检测中文网络暴力内容。特别注意以下绕过手法：
+1. 谐音字替换（如用"筹集"代替"臭鸡"）
+2. 拼音缩写（如 sb、nmsl）
+3. 数字谐音
+4. 故意错别字
+5. 词义污化（普通词被赋予贬义含义）
 
-export const AIMode = {
-  OFF:  'off',   // 不调用 AI
-  ECO:  'eco',   // 仅 L1 miss + L2 suspicious 才触发，批量打包
-  FULL: 'full',  // L1 miss 全部送 AI
-};
+判断标准是说话者的意图，而非字面用词。
+同一词汇在不同语境下可能有完全不同的判定。
+
+你需要同时做两项独立分析，输出一个 JSON 对象包含两个判断：
+
+第一项(topic)：内容是否涉及用户不想看的话题（性别对立、地域攻击、人身攻击、引战/钓鱼、pua/pua话术）
+第二项(attack)：内容是否是针对特定个人的恶意攻击、骚扰、贬低或威胁
+
+请输出严格的 JSON 格式：
+{
+  "topic": {
+    "verdict": "toxic" | "safe",
+    "confidence": 0.0-1.0,
+    "reason": "一句简短的原因说明",
+    "topic_label": "话题类别(topic类才需要，如性别对立/地域攻击/人身攻击/pua/引战)"
+  },
+  "attack": {
+    "verdict": "toxic" | "safe",
+    "confidence": 0.0-1.0,
+    "reason": "一句简短的原因说明"
+  },
+  "patterns": ["提取的触发模式，便于本地规则学习"]
+}`;
 
 // ─── 批处理参数 ────────────────────────────────────────────────────────────────
 
 const BATCH_SIZE = 10;
 const BATCH_TIMEOUT = 5000; // 5s
-const DEFAULT_DAILY_LIMIT = 30;
 
 export class AIAnalyzer {
-  /**
-   * @param {object} config
-   * @param {string} [config.apiKey]       API 密钥
-   * @param {string} [config.aiProvider]   'claude' | 'openai' | 自定义
-   * @param {string} [config.aiModel]      模型覆盖
-   * @param {string} [config.aiEndpoint]   自定义端点（OpenAI 兼容）
-   * @param {string} [config.aiMode]       'off' | 'eco' | 'full'
-   * @param {number} [config.aiDailyLimit] 每日调用上限
-   * @param {boolean} [config.aiEnabled]   全局 AI 开关
-   */
   constructor(config) {
     this.config = config;
     this.dailyCount = 0;
     this.lastResetDate = null;
     this._loadDailyCount();
 
-    // 创建 Provider 实例
-    this.provider = null;
-    this._initProvider();
-
     // 批处理队列
     this._queue = [];
     this._queueTimer = null;
     this._queueResolvers = new Map();
     this._queueIdCounter = 0;
+
+    // Token 统计
+    this._totalTokens = 0;
+    this._sessionTokens = 0;
+    this._loadTokenStats();
+
+    // 连接状态
+    this._connected = false;
   }
-
-  /** 初始化/重建 Provider */
-  _initProvider() {
-    if (this.config.apiKey) {
-      this.provider = createProvider(this.config);
-    } else {
-      this.provider = null;
-    }
-  }
-
-  /**
-   * 更新配置（面板实时修改时调用）
-   */
-  updateConfig(newConfig) {
-    Object.assign(this.config, newConfig);
-    this._initProvider();
-  }
-
-  // ─── AI 模式与路由 ──────────────────────────────────────────────────────────
-
-  /** 获取当前 AI 模式 */
-  getMode() {
-    if (!this.config.aiEnabled) return AIMode.OFF;
-    return this.config.aiMode || AIMode.ECO;
-  }
-
-  /**
-   * 判断是否应该调用 AI（路由条件 A3）
-   *
-   * 进入 AI 的条件全部满足才触发：
-   * 1. AI 模式不是 off
-   * 2. Provider 可用（有 API Key）
-   * 3. 今日调用未达上限
-   * 4. Layer 1 未命中
-   * 5. eco 模式下：Layer 2 必须为 suspicious
-   *    full 模式下：Layer 1 miss 即可
-   * 6. topic-filter 确认涉及用户关心的话题（可选，由调用方传入）
-   *
-   * @param {object} layerResult  Layer 1/2 的结果
-   * @param {boolean} [involvesTopic]  是否涉及用户关心话题
-   * @returns {boolean}
-   */
-  shouldAnalyze(layerResult, involvesTopic = true) {
-    const mode = this.getMode();
-    if (mode === AIMode.OFF) return false;
-    if (!this.provider) return false;
-    if (!this._checkDailyLimit()) return false;
-
-    // Layer 1 命中 → 不需要 AI
-    if (layerResult.layer === 1 && layerResult.verdict === 'toxic') return false;
-
-    if (mode === AIMode.ECO) {
-      // eco: 仅 L2 suspicious 触发
-      return layerResult.verdict === 'suspicious';
-    }
-
-    if (mode === AIMode.FULL) {
-      // full: L1 miss 全部送 AI（但 safe 的 L2 可以跳过）
-      return layerResult.verdict !== 'toxic';
-    }
-
-    return false;
-  }
-
-  // ─── 分析入口 ──────────────────────────────────────────────────────────────
 
   /**
    * AI 分析入口 — 支持批处理合并
    * @param {string} text
    * @param {object} context  { platform, isReply, mentionsUser, username }
-   * @returns {Promise<object|null>}  升级后的 AIResult
+   * @returns {Promise<object|null>}  { verdict, confidence, layer:3, reason, patterns }
    */
   async analyze(text, context = {}) {
-    if (!this.provider) return null;
+    if (!this.config.apiKey) return null;
     if (!this._checkDailyLimit()) return null;
 
+    // 通过 Promise 入队，攒够批量或超时后统一发送
     return new Promise((resolve) => {
       const id = ++this._queueIdCounter;
       this._queueResolvers.set(id, resolve);
@@ -142,32 +89,6 @@ export class AIAnalyzer {
     });
   }
 
-  /**
-   * 单条即时分析（不走批处理队列）
-   * @param {string} text
-   * @param {object} context
-   * @returns {Promise<object|null>}
-   */
-  async analyzeImmediate(text, context = {}) {
-    if (!this.provider) return null;
-    if (!this._checkDailyLimit()) return null;
-
-    try {
-      const result = await this.provider.analyzeSingle(text, context);
-      if (result) {
-        this.dailyCount++;
-        this._saveDailyCount();
-        result.layer = 3;
-      }
-      return result;
-    } catch (err) {
-      console.warn('[CyberShield] AI single analysis failed:', err);
-      return null;
-    }
-  }
-
-  // ─── 每日限额 ──────────────────────────────────────────────────────────────
-
   /** 获取今日已用次数 */
   getTodayUsage() {
     return this.dailyCount;
@@ -175,16 +96,15 @@ export class AIAnalyzer {
 
   /** 获取每日上限 */
   getDailyLimit() {
-    return this.config.aiDailyLimit || DEFAULT_DAILY_LIMIT;
+    // 优先使用用户自定义的限额；无自定义时：完整模式 200，其他模式 30
+    if (this.config.aiDailyLimit !== undefined && this.config.aiDailyLimit > 0) {
+      return this.config.aiDailyLimit;
+    }
+    const mode = this.config.aiMode || 'eco';
+    return mode === 'full' ? 200 : 30;
   }
 
-  /** 是否已达到每日上限 */
-  isLimitReached() {
-    this._checkDailyLimit(); // 刷新日期
-    return this.dailyCount >= this.getDailyLimit();
-  }
-
-  /** 检查是否达到每日上限，未达则返回 true */
+  /** 检查是否达到每日上限 */
   _checkDailyLimit() {
     const today = new Date().toDateString();
     if (this.lastResetDate !== today) {
@@ -212,9 +132,58 @@ export class AIAnalyzer {
     } catch (e) { /* silent */ }
   }
 
-  // ─── 批处理引擎 ────────────────────────────────────────────────────────────
+  _loadTokenStats() {
+    try {
+      this._totalTokens = parseInt(GM_getValue('cs_ai_total_tokens', '0'), 10);
+    } catch (e) { this._totalTokens = 0; }
+  }
 
-  /** 刷新批处理队列 */
+  _saveTokenStats() {
+    try {
+      GM_setValue('cs_ai_total_tokens', String(this._totalTokens));
+    } catch (e) { /* silent */ }
+  }
+
+  /** 记录 token 消耗（从 API 响应中提取） */
+  _recordTokenUsage(responseData, format) {
+    let tokens = 0;
+    if (format === 'openai') {
+      tokens = responseData.usage?.total_tokens || 0;
+    } else {
+      // Claude 格式
+      tokens = (responseData.usage?.input_tokens || 0) + (responseData.usage?.output_tokens || 0);
+    }
+    if (tokens > 0) {
+      this._totalTokens += tokens;
+      this._sessionTokens += tokens;
+      this._saveTokenStats();
+    }
+    return tokens;
+  }
+
+  /** 获取 AI 状态信息（供面板展示） */
+  getStatus() {
+    const apiConfig = this._getAPIConfig();
+    return {
+      provider: this.config.aiProvider || 'claude',
+      model: apiConfig.model || '',
+      dailyUsed: this.dailyCount,
+      dailyLimit: this.getDailyLimit(),
+      isLimitReached: !this._checkDailyLimit(),
+      connected: this._connected,
+      totalTokens: this._totalTokens,
+      sessionTokens: this._sessionTokens,
+    };
+  }
+
+  /**
+   * 检查是否应该进行 AI 分析（用于前置判断，避免无效调用）
+   */
+  shouldAnalyze() {
+    return !!(this.config.apiKey && this._checkDailyLimit());
+  }
+
+  /** 刷新批处理队列，攒够一批后发送 */
   _flushBatch() {
     if (this._queueTimer) {
       clearTimeout(this._queueTimer);
@@ -224,8 +193,7 @@ export class AIAnalyzer {
     const batch = this._queue.splice(0, BATCH_SIZE);
     if (batch.length === 0) return;
 
-    // eco 模式使用批量调用
-    this._callBatch(batch).then(results => {
+    this._callBatchAPI(batch).then(results => {
       for (let i = 0; i < batch.length; i++) {
         const item = batch[i];
         const resolve = this._queueResolvers.get(item.id);
@@ -236,7 +204,6 @@ export class AIAnalyzer {
       }
     }).catch(err => {
       console.warn('[CyberShield] Batch AI failed, falling back to single:', err);
-      // 批量失败 → 逐条回退
       for (const item of batch) {
         const resolve = this._queueResolvers.get(item.id);
         if (resolve) {
@@ -246,58 +213,488 @@ export class AIAnalyzer {
     });
   }
 
-  /** 批量调用 Provider */
-  async _callBatch(batch) {
-    const items = batch.map(b => ({ text: b.text, context: b.context }));
-    const results = await this.provider.analyzeBatch(items);
+  /** 批量 API 调用 */
+  async _callBatchAPI(batch) {
+    const batchText = batch.map((item, i) =>
+      `[${i + 1}] """${item.text}""" (platform: ${item.context.platform || 'unknown'})`
+    ).join('\n\n');
+
+    const prompt = `Analyze each of the following ${batch.length} messages for toxicity. Respond with a JSON array where each element corresponds to the message at the same index.
+
+Messages:
+${batchText}
+
+Respond with ONLY valid JSON array:
+[
+  { "verdict": "toxic"|"suspicious"|"safe", "confidence": 0.0-1.0, "reason": "...", "patterns": ["..."] }
+]`;
+
+    const apiConfig = this._getAPIConfig();
+
+    if (apiConfig.format === 'gemini') {
+      const rawData = await this._gmFetch(apiConfig.url, {
+        method: 'POST',
+        headers: apiConfig.headers,
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 200 * batch.length },
+          systemInstruction: { parts: [{ text: DEFAULT_SYSTEM_PROMPT }] },
+        }),
+      });
+      const raw = rawData.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+      const results = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      this._recordTokenUsage(rawData, 'gemini');
+      this._connected = true;
+      if (!Array.isArray(results)) return batch.map(() => null);
+      return results.map(r => {
+        if (!r) return null;
+        this.dailyCount++;
+        this._saveDailyCount();
+        return {
+          verdict:    r.verdict     || 'safe',
+          confidence: r.confidence  || 0.5,
+          layer:      3,
+          reason:     r.reason      || 'AI analysis',
+          patterns:   r.patterns    || [],
+        };
+      });
+    }
+
+    if (apiConfig.format === 'openai') {
+      const rawData = await this._gmFetch(apiConfig.url, {
+        method: 'POST',
+        headers: apiConfig.headers,
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 200 * batch.length,
+          messages: [
+            { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+      const raw = rawData.choices?.[0]?.message?.content || '[]';
+      const results = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      this._recordTokenUsage(rawData, 'openai');
+      this._connected = true;
+      if (!Array.isArray(results)) return batch.map(() => null);
+      return results.map(r => {
+        if (!r) return null;
+        this.dailyCount++;
+        this._saveDailyCount();
+        return {
+          verdict:    r.verdict     || 'safe',
+          confidence: r.confidence  || 0.5,
+          layer:      3,
+          reason:     r.reason      || 'AI analysis',
+          patterns:   r.patterns    || [],
+        };
+      });
+    }
+
+    // Claude 格式
+    const rawData = await this._gmFetch(apiConfig.url, {
+      method: 'POST',
+      headers: apiConfig.headers,
+      body: JSON.stringify({
+        model: apiConfig.model,
+        system: DEFAULT_SYSTEM_PROMPT,
+        max_tokens: 200 * batch.length,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const raw = rawData.content?.[0]?.text || '[]';
+    const results = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    this._recordTokenUsage(rawData, 'claude');
+    this._connected = true;
+
+    if (!Array.isArray(results)) return batch.map(() => null);
 
     return results.map(r => {
       if (!r) return null;
       this.dailyCount++;
       this._saveDailyCount();
-      r.layer = 3;
-      return r;
+      return {
+        verdict:    r.verdict     || 'safe',
+        confidence: r.confidence  || 0.5,
+        layer:      3,
+        reason:     r.reason      || 'AI analysis',
+        patterns:   r.patterns    || [],
+      };
     });
   }
 
-  /** 单条回退 */
+  /** 单条回退（批量失败时降级） */
   async _singleFallback(item, resolve) {
+    const prompt = this._buildPrompt(item.text, item.context);
     try {
-      const result = await this.provider.analyzeSingle(item.text, item.context);
-      if (result) {
+      const apiConfig = this._getAPIConfig();
+
+      if (apiConfig.format === 'openai') {
+        const rawData = await this._gmFetch(apiConfig.url, {
+          method: 'POST',
+          headers: apiConfig.headers,
+          body: JSON.stringify({
+            model: apiConfig.model,
+            max_tokens: 200,
+            messages: [
+              { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+              { role: 'user', content: prompt },
+            ],
+          }),
+        });
+        const raw = rawData.choices?.[0]?.message?.content || '{}';
+        const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
         this.dailyCount++;
         this._saveDailyCount();
-        result.layer = 3;
+        resolve({
+          verdict:    result.verdict     || 'safe',
+          confidence: result.confidence  || 0.5,
+          layer:      3,
+          reason:     result.reason      || 'AI analysis',
+          patterns:   result.patterns    || [],
+        });
+      } else {
+        const rawData = await this._gmFetch(apiConfig.url, {
+          method: 'POST',
+          headers: apiConfig.headers,
+          body: JSON.stringify({
+            model: apiConfig.model,
+            system: DEFAULT_SYSTEM_PROMPT,
+            max_tokens: 200,
+            messages: [{ role: 'user', content: prompt }],
+          }),
+        });
+        const raw = rawData.content?.[0]?.text || '{}';
+        const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
+        this.dailyCount++;
+        this._saveDailyCount();
+        resolve({
+          verdict:    result.verdict     || 'safe',
+          confidence: result.confidence  || 0.5,
+          layer:      3,
+          reason:     result.reason      || 'AI analysis',
+          patterns:   result.patterns    || [],
+        });
       }
-      resolve(result);
     } catch (err) {
       resolve(null);
     }
   }
 
-  // ─── 状态信息（供面板展示）──────────────────────────────────────────────────
+  _buildPrompt(text, context) {
+    return `Text: """${text}"""
+Context: Platform=${context.platform || 'unknown'}, Is a direct reply=${!!context.isReply}
 
-  /** 获取完整状态 */
-  getStatus() {
+Respond with ONLY valid JSON:
+{
+  "topic": {
+    "verdict": "toxic" | "safe",
+    "confidence": 0.0-1.0,
+    "reason": "one sentence explanation",
+    "topic_label": "topic category"
+  },
+  "attack": {
+    "verdict": "toxic" | "safe",
+    "confidence": 0.0-1.0,
+    "reason": "one sentence explanation"
+  },
+  "patterns": ["list of trigger patterns"]
+}`;
+  }
+
+  /** 合并双轨结果为单条输出（兼容下游消费代码） */
+  _combineDualTrack(parsed) {
+    const topic = parsed.topic || {};
+    const attack = parsed.attack || {};
+    const patterns = parsed.patterns || [];
+
+    const topicToxic = topic.verdict === 'toxic';
+    const attackToxic = attack.verdict === 'toxic';
+
+    if (!topicToxic && !attackToxic) {
+      return { verdict: 'safe', confidence: 0.2, layer: 3, reason: 'No issues detected', patterns: [] };
+    }
+
+    // 两轨取置信度最高的
+    const higher = topic.confidence > attack.confidence ? topic : attack;
+    const reasons = [];
+    if (topicToxic) reasons.push(`[话题] ${topic.reason}`);
+    if (attackToxic) reasons.push(`[攻击] ${attack.reason}`);
+
     return {
-      mode: this.getMode(),
-      provider: this.provider?.name || 'none',
-      model: this.provider?.model || 'none',
-      dailyUsed: this.dailyCount,
-      dailyLimit: this.getDailyLimit(),
-      isLimitReached: this.isLimitReached(),
-      hasApiKey: !!this.config.apiKey,
-      queueSize: this._queue.length,
+      verdict: 'toxic',
+      confidence: higher.confidence || 0.85,
+      layer: 3,
+      reason: reasons.join('；'),
+      patterns,
+      // ★ 附加字段：供 auto-learn / topicFilter 使用
+      intent: topicToxic ? (topic.topic_label || null) : null,
+      _dualTopic: topicToxic ? topic : null,
+      _dualAttack: attackToxic ? attack : null,
     };
   }
 
-  /** 验证当前 API Key 是否有效 */
+  async _callAPI(prompt) {
+    const apiConfig = this._getAPIConfig();
+
+    if (apiConfig.format === 'openai') {
+      const data = await this._gmFetch(apiConfig.url, {
+        method: 'POST',
+        headers: apiConfig.headers,
+        body: JSON.stringify({
+          model: apiConfig.model,
+          max_tokens: 200,
+          messages: [
+            { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      });
+      const raw = data.choices?.[0]?.message?.content || '{}';
+      const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      return this._combineDualTrack(result);
+    }
+
+    // Claude 格式
+    const data = await this._gmFetch(apiConfig.url, {
+      method: 'POST',
+      headers: apiConfig.headers,
+      body: JSON.stringify({
+        model: apiConfig.model,
+        system: DEFAULT_SYSTEM_PROMPT,
+        max_tokens: 200,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const raw = data.content?.[0]?.text || '{}';
+    const result = JSON.parse(raw.replace(/```json|```/g, '').trim());
+
+    return this._combineDualTrack(result);
+  }
+
+  _gmFetch(url, options = {}) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        url,
+        method: options.method || 'GET',
+        headers: options.headers || {},
+        data: options.body,
+        timeout: options.timeout || 15000,
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            // 兼容处理：responseType 'json' 在部分管理器中不生效
+            let data = res.response;
+            if (typeof data === 'string') {
+              try { data = JSON.parse(data); } catch (e) { /* 不是 JSON，保持原样 */ }
+            }
+            resolve(data);
+          } else {
+            const detail = res.responseText?.slice(0, 300) || res.statusText || '';
+            reject(new Error(`HTTP ${res.status}: ${detail}`));
+          }
+        },
+        onerror: (err) => reject(new Error(`Network error: ${err?.statusText || 'unknown'}`)),
+        ontimeout: () => reject(new Error('Request timed out (15s)')),
+      });
+    });
+  }
+
+  /** 更新配置（面板修改后调用） */
+  updateConfig(newConfig) {
+    Object.assign(this.config, newConfig);
+    // 如果更新了每日限额，重置计数（仅在变更时）
+    if (newConfig.aiDailyLimit && this.dailyCount >= newConfig.aiDailyLimit) {
+      console.log('[CyberShield] AI daily limit updated, daily count may exceed new limit');
+    }
+  }
+
+  /**
+   * 获取当前 API 端点、headers、默认模型
+   * 根据 aiProvider 返回不同的请求参数
+   */
+  _getAPIConfig() {
+    const provider = this.config.aiProvider || 'claude';
+    const customModel = this.config.aiModel || '';
+
+    switch (provider) {
+      case 'deepseek': {
+        const endpoint = this.config.aiEndpoint || 'https://api.deepseek.com/chat/completions';
+        const model = customModel || 'deepseek-chat';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'mimo': {
+        const endpoint = this.config.aiEndpoint || 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions';
+        const model = customModel || 'mimo-v2-flash';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'glm': {
+        const endpoint = this.config.aiEndpoint || 'https://open.bigmodel.cn/api/paas/v4/chat/completions';
+        const model = customModel || 'glm-4-flash';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'kimi': {
+        const endpoint = this.config.aiEndpoint || 'https://api.moonshot.cn/v1/chat/completions';
+        const model = customModel || 'moonshot-v1-8k';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'gemini': {
+        const endpoint = this.config.aiEndpoint || `https://generativelanguage.googleapis.com/v1beta/models/${customModel || 'gemini-2.0-flash'}:generateContent`;
+        const model = customModel || 'gemini-2.0-flash';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': this.config.apiKey,
+          },
+          model,
+          format: 'gemini',
+        };
+      }
+      case 'openrouter': {
+        const endpoint = this.config.aiEndpoint || 'https://openrouter.ai/api/v1/chat/completions';
+        const model = customModel || 'openai/gpt-4o-mini';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+            'HTTP-Referer': typeof location !== 'undefined' ? location.origin : '',
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'openai': {
+        const endpoint = this.config.aiEndpoint || 'https://api.openai.com/v1/chat/completions';
+        const model = customModel || 'gpt-4o-mini';
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'custom': {
+        const endpoint = this.config.aiEndpoint || '';
+        const model = customModel || '';
+        // 自定义端点默认用 OpenAI 兼容格式
+        return {
+          url: endpoint,
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.config.apiKey}`,
+          },
+          model,
+          format: 'openai',
+        };
+      }
+      case 'claude':
+      default: {
+        return {
+          url: 'https://api.anthropic.com/v1/messages',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': this.config.apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          model: customModel || 'claude-sonnet-4-20250514',
+          format: 'claude',
+        };
+      }
+    }
+  }
+
+  /**
+   * 验证 API 密钥是否有效
+   * 发送一个最小请求来测试连通性
+   */
   async validateKey() {
-    if (!this.provider) return false;
+    if (!this.config.apiKey) return { ok: false, error: 'No API key' };
+
     try {
-      return await this.provider.validateKey();
-    } catch (e) {
-      return false;
+      const apiConfig = this._getAPIConfig();
+      if (!apiConfig.url) return { ok: false, error: 'No endpoint configured' };
+
+      let ok = false;
+
+      if (apiConfig.format === 'gemini') {
+        const data = await this._gmFetch(apiConfig.url, {
+          method: 'POST',
+          headers: apiConfig.headers,
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Hi' }] }],
+            generationConfig: { maxOutputTokens: 5 },
+          }),
+        });
+        ok = !!(data.candidates || data.promptFeedback);
+      } else if (apiConfig.format === 'openai') {
+        const data = await this._gmFetch(apiConfig.url, {
+          method: 'POST',
+          headers: apiConfig.headers,
+          body: JSON.stringify({
+            model: apiConfig.model,
+            max_tokens: 5,
+            messages: [{ role: 'user', content: 'Hi' }],
+          }),
+        });
+        ok = !!(data.choices || data.id || data.content);
+      } else {
+        const data = await this._gmFetch(apiConfig.url, {
+          method: 'POST',
+          headers: apiConfig.headers,
+          body: JSON.stringify({
+            model: apiConfig.model,
+            max_tokens: 5,
+            messages: [{ role: 'user', content: 'Hi' }],
+          }),
+        });
+        ok = !!(data.content || data.id);
+      }
+
+      this._connected = ok;
+      return { ok, error: ok ? null : 'Unexpected response format' };
+    } catch (err) {
+      console.warn('[CyberShield] API key validation failed:', err.message);
+      this._connected = false;
+      return { ok: false, error: err.message };
     }
   }
 }

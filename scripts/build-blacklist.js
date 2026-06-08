@@ -82,23 +82,16 @@ console.log(`中文词数: ${zhWords.size}`);
 console.log(`英文词数: ${enWords.size}`);
 console.log(`其他语言词数: ${otherWords.size}`);
 
-// 生成输出格式
-const timestamp = Date.now();
-const output = Array.from(allKeywords).map(keyword => ({
-  keyword,
-  aliases: [],
-  addedAt: timestamp
-}));
+// 生成输出格式（仅保留关键词，剔除时间戳等元数据保障隐私安全）
+const output = Array.from(allKeywords).sort((a, b) => a.localeCompare(b));
 
-// 按关键词排序
-output.sort((a, b) => a.keyword.localeCompare(b.keyword));
-
-// 输出到文件
+// 输出到文件（纯数组格式，不含元数据）
 const outputPath = path.join(projectRoot, 'default-blacklist.json');
 fs.writeFileSync(outputPath, JSON.stringify(output, null, 2));
 
 console.log('========================================');
 console.log(`输出文件: ${outputPath}`);
-console.log(`生成时间: ${new Date(timestamp).toLocaleString()}`);
+console.log(`总词数: ${output.length}`);
+console.log('注意：仅输出关键词，已剥离时间戳等元数据');
 console.log('========================================');
 console.log('词库构建完成!');

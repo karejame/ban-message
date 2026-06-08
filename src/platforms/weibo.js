@@ -23,6 +23,26 @@ export const WeiboPlatform = {
     return userLink?.textContent || null;
   },
 
+  /** 判定账号级别 */
+  getAccountLevel(commentEl) {
+    // 微博：.verify-icon 的 type 属性区分橙V(official)和蓝V(verified)
+    if (!commentEl) return 'normal';
+    const icon = commentEl.querySelector('.verify-icon, .W_icon, [class*="verify"]');
+    if (icon) {
+      const type = icon.getAttribute('type') || '';
+      if (/orange|gold|official/.test(type)) return 'official';
+      if (/blue|personal|verified/.test(type)) return 'verified';
+    }
+    // 降级：检查 aria-label 或 title
+    const label = commentEl.querySelector('[aria-label*="V"], [title*="V"]');
+    if (label) {
+      const text = label.getAttribute('aria-label') || label.getAttribute('title') || '';
+      if (/金V|橙V|official/i.test(text)) return 'official';
+      if (/蓝V/i.test(text)) return 'verified';
+    }
+    return 'normal';
+  },
+
   blockStrategy(username, sourceElement) {
     // 微博: Three-tier fallback strategy
     // 1. Try API block (requires SUB token)

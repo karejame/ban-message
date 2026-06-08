@@ -23,6 +23,7 @@ export class Scanner {
     this.topicFilter = new TopicFilter();
     this.contextWindow = new ContextWindow({ windowMs: 60000 });
     this.memory = new MemoryManager();
+    this._revealedTexts = new Set(); // 存储已手动解除屏蔽的文本 hash
     this.observer = null;
     this._seen = new WeakSet();
     this._pendingNodes = [];
@@ -59,6 +60,8 @@ export class Scanner {
       observerActive: false,
       waitingForInit: false,
     };
+    // 从 GM 存储恢复历史统计数据 + 设置自动持久化
+    this._initStats();
   }
 
   /** 初始化远程词库 + 记忆清理 */
@@ -143,6 +146,44 @@ export class Scanner {
     this._detectHarassment();
     this.stats.lastScanTime = Date.now();
     emit('stats:update', this._getStatsPayload());
+  }
+
+  /** 从 GM 存储恢复统计数据 + Proxy 自动持久化 */
+  _initStats() {
+    // 持久化统计的 GM 存储键
+    const STATS_KEY = 'cs_stats';
+    // 从存储加载历史数据
+    try {
+      const saved = JSON.parse(GM_getValue(STATS_KEY, null));
+      if (saved) {
+        // 跳过 platform（始终使用当前平台的名称）
+        const { platform, ...restorable } = saved;
+        Object.assign(this.stats, restorable);
+      }
+    } catch (e) { /* 首次运行无数据，使用默认值 */ }
+
+    // 用 Proxy 包装 stats：属性变更时自动持久化（防抖 500ms）
+    const self = this;
+    this._statsSaveTimer = null;
+    const handler = {
+      set(target, prop, value) {
+        target[prop] = value;
+        if (self._statsSaveTimer) clearTimeout(self._statsSaveTimer);
+        self._statsSaveTimer = setTimeout(() => self._saveStats(STATS_KEY), 500);
+        return true;
+      }
+    };
+    this.stats = new Proxy(this.stats, handler);
+
+    // 页面关闭前也保存一次
+    window.addEventListener('beforeunload', () => this._saveStats(STATS_KEY));
+  }
+
+  /** 持久化统计数据到 GM 存储 */
+  _saveStats(key) {
+    try {
+      GM_setValue(key, JSON.stringify(this.stats));
+    } catch (e) { /* 静默 */ }
   }
 
   _updateRuleCounts() {
@@ -652,6 +693,12 @@ export class Scanner {
     const context = this._buildContext(el, username);
     context._element = el; // 传给 context-window
 
+    // ★ 检测账号级别（白名单已在 _processComment 入口放行）
+    const accountLevel = this.platform?.getAccountLevel
+      ? this.platform.getAccountLevel(el) || 'normal'
+      : 'normal';
+    context.accountLevel = accountLevel;
+
     const result = this.detector.analyze(text, context, this.aiAnalyzer, (aiResult) => {
       if (!aiResult) return;
 
@@ -672,6 +719,39 @@ export class Scanner {
             confidence: aiResult.confidence,
             source: 'ai_learned',
           });
+          // ★ 记忆写入后立即刷新面板统计
+          emit('stats:update', this._getStatsPayload());
+        }
+
+        // ★ AI 自动升级拦截系统：将高置信度模式提升为硬关键词
+        if (aiResult.confidence >= 0.85 && aiResult.patterns && aiResult.patterns.length > 0) {
+          if (!this.config.autoLearnedKeywords) this.config.autoLearnedKeywords = [];
+          let newCount = 0;
+          for (const p of aiResult.patterns) {
+            const lower = p.toLowerCase().trim();
+            if (lower.length >= 2 && !this.config.autoLearnedKeywords.includes(lower) && !this.detector.hardKeywords.has(lower)) {
+              this.config.autoLearnedKeywords.push(lower);
+              newCount++;
+            }
+          }
+          // 限制数量，避免膨胀
+          if (this.config.autoLearnedKeywords.length > 100) {
+            this.config.autoLearnedKeywords = this.config.autoLearnedKeywords.slice(-100);
+          }
+          if (newCount > 0) {
+            // 持久化配置
+            try { GM_setValue('cs_config', JSON.stringify(this.config)); } catch (e) {}
+            emit('config:updated', { type: 'autoLearnedKeywords' });
+            // ★ 刷新面板统计（autoLearnedKeywords 数量变化）
+            emit('stats:update', this._getStatsPayload());
+          }
+        }
+
+        // ★ AI 自动更新话题过滤器关键词和匹配示例
+        if (aiResult.intent && this.topicFilter) {
+          try {
+            this.topicFilter.learnFromAI(aiResult.intent, aiResult.patterns || [], text, username, aiResult.confidence);
+          } catch (e) { /* silent */ }
         }
       }
 
@@ -679,9 +759,25 @@ export class Scanner {
       if (aiResult.verdict === Verdict.TOXIC && shouldAct(aiResult.riskLevel || 'high', this.config.sensitivity)) {
         this._handleToxic(el, text, username, aiResult, contentType);
       }
+
+      // ★ AI 结果更新扫描日志：重新 emit scan:result 标记 AI 层
+      emit('scan:result', {
+        text: text.slice(0, 200),
+        username,
+        verdict: aiResult.verdict,
+        reason: aiResult.reason || 'AI analysis',
+        confidence: aiResult.confidence,
+        contentType,
+        uid: this._extractUserUID(el),
+        timestamp: Date.now(),
+        layer: 3,
+        aiDetected: true,
+        aiSummary: aiResult.reason || '',
+      });
     }, {
       topicFilter: this.topicFilter,
       contextWindow: this.contextWindow,
+      accountLevel,
     });
 
     if (result.verdict === Verdict.TOXIC && shouldAct(result.riskLevel || 'high', this.config.sensitivity)) {
@@ -710,6 +806,8 @@ export class Scanner {
       contentType,
       uid: this._extractUserUID(el),
       timestamp: Date.now(),
+      layer: result.layer || 1,
+      aiDetected: false,
     });
 
     emit('stats:update', this._getStatsPayload());
@@ -906,8 +1004,13 @@ export class Scanner {
   // ── 有害内容处理 ────────────────────────────────────────────────────────────
 
   _handleToxic(el, text, username, result, contentType = 'comment') {
+    // ★ 已手动解除屏蔽的内容不再重新屏蔽
+    const textHash = this._textHash(text);
+    if (this._revealedTexts.has(textHash)) return;
+
     this.stats.filtered++;
-    this.evidence.log({ text, username, result, url: location.href, timestamp: Date.now(), contentType });
+    const matchedTopics = this.topicFilter?.detectAllTopics(text) || [];
+    this.evidence.log({ text, username, result, url: location.href, timestamp: Date.now(), contentType, matchedTopics });
 
     this.evidence.captureScreenshot(el).then(dataUrl => {
       if (dataUrl) {
@@ -1024,11 +1127,21 @@ export class Scanner {
    * 解除显示后提供"再次屏蔽"按钮防止误操作。
    * 
    * 定位策略：
-   * - 只放一个小按钮在气泡右侧空白处，不遮挡对话内容
-   * - 使用 position: absolute 相对于目标元素的父容器
-   * - IntersectionObserver 保证元素不可见时按钮也隐藏
+   * - 在模糊区域正中央显示一个醒目的解除按钮（固定定位覆盖在元素上方）
+   * - 使用 position: fixed 直接覆盖在目标元素上，不受 overflow 裁剪
+   * - IntersectionObserver 控制显示/隐藏，滚动回视口后自动恢复
+   * - ★ 每个按钮绑定目标元素的唯一 CS ID，避免批量扫描时互相删除
    */
   _blurContent(targetEl, result, type = 'toxic') {
+    // ★ 跳过已手动解除的内容
+    if (targetEl.dataset.csRevealed === 'true') return;
+
+    // ★ 为目标元素分配唯一 ID（用于按钮绑定，多元素时不会互相删除）
+    if (!targetEl.dataset.csId) {
+      targetEl.dataset.csId = `cs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+    const csId = targetEl.dataset.csId;
+
     targetEl.dataset.csVerdict = type;
     targetEl.dataset.csReason = result.reason;
     // ★ 使用内联样式替代 CSS 类，确保在 Shadow DOM 内也能生效
@@ -1039,81 +1152,86 @@ export class Scanner {
     targetEl.style.opacity = '0.5';
     targetEl.style.transition = 'filter 0.2s ease, opacity 0.2s ease';
 
-    // ★ 移除已有的显示/屏蔽按钮，防止重复扫描产生多个按钮
-    const parentEl = targetEl.parentNode || document.body;
-    // ★ 同时在文档级别移除所有相关按钮（防止 Shadow DOM 内外按钮残留）
-    document.querySelectorAll('.cs-reveal-float, .cs-reblock-btn').forEach(b => b.remove());
-    if (parentEl) {
-      parentEl.querySelectorAll('.cs-reveal-float, .cs-reblock-btn').forEach(b => b.remove());
-    }
+    // ★ 只移除属于当前目标元素的按钮（避免批量扫描时互相删除）
+    document.querySelectorAll(`.cs-reveal-btn[data-cs-target="${csId}"]`).forEach(b => b.remove());
+    document.querySelectorAll(`.cs-reblock-btn[data-cs-target="${csId}"]`).forEach(b => b.remove());
 
-    // ★ 只创建一个小按钮，放在气泡右侧空白处
+    // ★ 创建覆盖按钮，居中显示在模糊区域正上方
     const btn = document.createElement('button');
-    btn.className = 'cs-reveal-btn cs-reveal-float';
+    btn.className = 'cs-reveal-btn';
     btn.textContent = `🛡️ ${t('blurBtn')}`;
     btn.dataset.csOverlay = 'true';
+    btn.dataset.csTarget = csId;
     if (type === 'spam') btn.classList.add('cs-spam-overlay');
     if (type === 'harass') btn.classList.add('cs-harass-overlay');
 
-    // ★ 定位策略：按钮放在目标元素右侧
-    // 优先尝试 inline 插入到目标元素后面
-    // 如果目标元素在 Shadow DOM 内，则使用 absolute 定位到文档 body
-    let useInline = false;
-    const isInShadow = targetEl.getRootNode() instanceof ShadowRoot;
+    // 固定定位，覆盖在目标元素正中央
+    btn.style.position = 'fixed';
+    btn.style.zIndex = '2147483647';
+    btn.style.background = 'rgba(0,0,0,0.55)';
+    btn.style.backdropFilter = 'blur(4px)';
+    btn.style.color = '#fff';
+    btn.style.border = '1px solid rgba(255,255,255,0.25)';
+    btn.style.borderRadius = '8px';
+    btn.style.padding = '6px 14px';
+    btn.style.fontSize = '13px';
+    btn.style.fontWeight = '600';
+    btn.style.cursor = 'pointer';
+    btn.style.whiteSpace = 'nowrap';
+    btn.style.boxShadow = '0 2px 8px rgba(0,0,0,0.3)';
+    btn.style.transition = 'background 0.15s ease';
+    btn.style.lineHeight = '1.4';
 
-    if (!isInShadow) {
-      try {
-        if (targetEl.nextSibling) {
-          parentEl.insertBefore(btn, targetEl.nextSibling);
-        } else {
-          parentEl.appendChild(btn);
-        }
-        useInline = true;
-      } catch (e) {
-        // 插入失败，使用 absolute 定位
+    const positionOverlay = () => {
+      if (!btn.isConnected) return;
+      const r = targetEl.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0 || !this._isInViewport(r)) {
+        btn.style.display = 'none';
+        return;
       }
+      btn.style.display = '';
+      btn.style.top = `${r.top + r.height / 2 - 14}px`; // 垂直居中
+      btn.style.left = `${r.left + r.width / 2 - 70}px`; // 水平居中（偏移半个按钮宽度）
+    };
+
+    // 辅助：检测矩形是否在视口范围内
+    if (!this._isInViewport) {
+      this._isInViewport = (r) => !(r.right < 0 || r.bottom < 0 || r.left > window.innerWidth || r.top > window.innerHeight);
     }
 
-    if (!useInline) {
-      // ★ Shadow DOM 内元素或插入失败：使用 fixed 定位到目标元素右侧
-      const targetRect = targetEl.getBoundingClientRect();
-      btn.style.position = 'fixed';
-      btn.style.top = `${targetRect.top}px`;
-      btn.style.left = `${targetRect.right + 8}px`;
-      btn.style.zIndex = '2147483647';
-      document.body.appendChild(btn);
+    positionOverlay();
 
-      // ★ 滚动时更新 fixed 按钮位置
-      const updatePos = () => {
-        if (!btn.isConnected) { window.removeEventListener('scroll', updatePos, true); return; }
-        const r = targetEl.getBoundingClientRect();
-        btn.style.top = `${r.top}px`;
-        btn.style.left = `${r.right + 8}px`;
-      };
-      window.addEventListener('scroll', updatePos, true);
-      // 清理：按钮移除时取消监听
-      const origRemove = btn.remove.bind(btn);
-      btn.remove = () => { window.removeEventListener('scroll', updatePos, true); origRemove(); };
-    }
+    // ★ 滚动时更新位置
+    const updatePos = () => positionOverlay();
+    window.addEventListener('scroll', updatePos, true);
+    window.addEventListener('resize', updatePos);
 
-    // ★ 监听目标元素最近的可滚动祖先的 scroll 事件
-    const scrollables = [];
-    let scrollEl = targetEl.parentElement;
-    while (scrollEl && scrollEl !== document.documentElement) {
-      const { overflow, overflowY } = getComputedStyle(scrollEl);
-      if (/(auto|scroll)/.test(overflow + overflowY)) {
-        scrollables.push(scrollEl);
-      }
-      scrollEl = scrollEl.parentElement;
-    }
+    // 清理：按钮移除时取消监听
+    const origRemove = btn.remove.bind(btn);
+    btn.remove = () => {
+      window.removeEventListener('scroll', updatePos, true);
+      window.removeEventListener('resize', updatePos);
+      observer.disconnect();
+      origRemove();
+    };
 
-    // IntersectionObserver：元素不在视口时隐藏按钮
+    document.body.appendChild(btn);
+
+    // IntersectionObserver：元素不在视口时隐藏按钮，回到视口时恢复
     const observer = new IntersectionObserver(entries => {
       for (const entry of entries) {
-        btn.style.display = entry.isIntersecting ? '' : 'none';
+        if (!entry.isIntersecting) {
+          btn.style.display = 'none';
+        } else {
+          positionOverlay();
+        }
       }
-    }, { threshold: 0.05 });
+    }, { threshold: [0, 0.05] });
     observer.observe(targetEl);
+
+    // 悬停高亮
+    btn.addEventListener('mouseenter', () => { btn.style.background = 'rgba(0,0,0,0.75)'; });
+    btn.addEventListener('mouseleave', () => { btn.style.background = 'rgba(0,0,0,0.55)'; });
 
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1123,10 +1241,26 @@ export class Scanner {
       targetEl.style.pointerEvents = '';
       targetEl.style.userSelect = '';
       targetEl.style.opacity = '';
+      // ★ 标记已解除，防止后续重扫再次屏蔽
+      targetEl.dataset.csRevealed = 'true';
+      const hash = this._textHash(targetEl.innerText || targetEl.textContent || '');
+      if (hash) this._revealedTexts.add(hash);
       btn.remove();
-      observer.disconnect();
       this._addReBlockOption(targetEl, result, type);
     });
+  }
+
+  /** 计算文本的简单哈希，用于去重 */
+  _textHash(text) {
+    if (!text) return '';
+    const s = text.slice(0, 100).toLowerCase().replace(/\s+/g, ' ');
+    let hash = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      hash = ((hash << 5) - hash) + c;
+      hash = hash & hash;
+    }
+    return `h${Math.abs(hash)}`;
   }
 
   /**
@@ -1135,23 +1269,23 @@ export class Scanner {
    * ★ 防止重复添加：先移除已有的按钮再添加新的。
    */
   _addReBlockOption(targetEl, result, type) {
-    // ★ 移除已有的再次屏蔽按钮，防止重复
-    const parentEl = targetEl.parentNode;
-    // ★ 同时清理文档级别的残留按钮
-    document.querySelectorAll('.cs-reblock-btn, .cs-reveal-float').forEach(b => b.remove());
-    if (parentEl) {
-      parentEl.querySelectorAll('.cs-reblock-btn').forEach(b => b.remove());
-    }
+    const csId = targetEl.dataset.csId || '';
+
+    // ★ 只移除属于当前目标元素的再次屏蔽按钮
+    document.querySelectorAll(`.cs-reblock-btn[data-cs-target="${csId}"]`).forEach(b => b.remove());
+    document.querySelectorAll(`.cs-reveal-btn[data-cs-target="${csId}"]`).forEach(b => b.remove());
 
     const reBlockBtn = document.createElement('button');
     reBlockBtn.className = 'cs-reblock-btn';
     reBlockBtn.textContent = `🛡️ ${t('reblockBtn')}`;
     reBlockBtn.title = t('reblockHint');
+    reBlockBtn.dataset.csTarget = csId;
     reBlockBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
       reBlockBtn.remove();
-      // ★ 重新应用内联样式模糊
+      // ★ 重新模糊前清除已解除标记
+      delete targetEl.dataset.csRevealed;
       this._blurContent(targetEl, result, type);
     });
 

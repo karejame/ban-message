@@ -1,14 +1,27 @@
-let lang = (navigator.language || '').startsWith('zh') ? 'zh' : 'en';
+let lang = (() => {
+  try {
+    const saved = GM_getValue('cs_lang', '');
+    if (saved === 'zh' || saved === 'en') return saved;
+  } catch (e) { /* GM API unavailable */ }
+  return (navigator.language || '').startsWith('zh') ? 'zh' : 'en';
+})();
 
 const strings = {
   zh: {
     panelTitle: 'CyberShield',
     panelSubtitle: '网暴保护盾',
     protection: '保护开关',
-    sensitivity: '敏感度',
+    sensitivity: '防护灵敏度',
     low: '低',
     medium: '中',
     high: '高',
+    sensLow: '低敏',
+    sensLowDesc: '只过滤最恶意内容',
+    sensMedium: '均衡',
+    sensMediumDesc: '均衡防护（推荐）',
+    sensHigh: '严格',
+    sensHighDesc: '正在被骚扰',
+    sensHighWarning: '严格模式可能拦截正常内容，建议临时使用',
     autoBlock: '自动拉黑',
     aiMode: 'AI 增强',
     aiDisabled: 'AI 能力暂不可用（需配置 API 密钥）',
@@ -59,19 +72,39 @@ const strings = {
     customAdd: '添加',
     customDelete: '删除',
     customEmpty: '暂无自定义关键词',
-    customImport: '导入',
-    customExport: '导出',
+    customImport: '批量导入',
+    customExport: '批量导出',
     customDelConfirm: '确定要删除 "{keyword}" 吗？',
     customClearAll: '清空全部',
     customClearAllConfirm: '确定要删除全部 {n} 个自定义过滤词吗？此操作不可撤销。',
     customCleared: '自定义过滤词已清空',
     customDeleted: '已删除 "{keyword}"',
+    customEdit: '编辑',
+    customEditTitle: '编辑关键词',
+    customEditKeyword: '关键词',
+    customEditAliases: '别名（逗号分隔）',
+    customEditSave: '保存',
+    customEditCancel: '取消',
+    customSearchPlaceholder: '搜索关键词...',
+    customSearchNoResult: '未找到匹配的关键词',
+    rulesSearchPlaceholder: '搜索规则...',
+    rulesSearchNoResult: '未找到匹配的规则',
+    sectionRulesCustom: '屏蔽规则',
 
     // ── 规则查看 ────────────────────────────────────────────────────────────
     rulesTitle: '屏蔽规则',
     rulesHard: '硬关键词（直接屏蔽）',
     rulesSoft: '软关键词（敏感检测）',
-    rulesRegex: '正则表达式',
+    rulesRegex: '内置正则',
+    rulesCustomRegex: '自定义正则',
+    regexAddPlaceholder: '输入正则表达式...',
+    regexAddFlags: '标志',
+    regexAddDesc: '描述（可选）',
+    regexAddBtn: '添加',
+    regexDelConfirm: '确定删除正则规则 "{pattern}" 吗？',
+    regexInvalid: '无效的正则表达式',
+    regexExists: '该正则规则已存在',
+    regexDescBuiltin: '内置规则',
     rulesCustom: '自定义关键词',
     rulesVariant: '变体映射',
     rulesPinyin: '拼音映射',
@@ -149,6 +182,15 @@ const strings = {
     aboutPrivacy: '隐私声明',
     aboutGithub: 'GitHub',
 
+    // ── 快速上手 ──────────────────────────────────────────────────────
+    guideTitle: '快速上手',
+    guideSens: '防护灵敏度',
+    guideSensDesc: '低敏 → 仅 L1 硬关键词，适合日常安静浏览。均衡（推荐）→ 自动识别账号级别：官方/金标账号跳过 L2/L3 减少误杀，普通账号全流水线检测。严格 → 全三层 + 降低软词阈值，被骚扰时临时开启。',
+    guideAI: 'AI 双轨分析',
+    guideAIDesc: '开启 AI 后，每条内容会同时分析话题（topic）和攻击性（attack）两轨。任一轨判定为有害即拦截，AI 还会自动学习高频模式提升为本地规则。',
+    guideLayers: '三层检测架构',
+    guideLayersDesc: 'L1 关键词 + 正则 + 变体/谐音匹配(毫秒级) → L2 行为信号分析(全大写/重复/emoji) → L3 AI 语义分析(需配置 API Key，仅对前两层判定为可疑的内容触发，节约配额)。',
+
     // ── 扫描原因（scanner.js） ──────────────────────────────────────────
     harassReason: '骚扰: @{user}发送{count}条回复',
     harassEvidence: '同一用户@{user}发送{count}条回复',
@@ -184,16 +226,24 @@ const strings = {
     aiProvider: 'AI 服务商',
     aiProviderClaude: 'Claude (Anthropic)',
     aiProviderOpenAI: 'OpenAI (GPT)',
+    aiProviderOpenRouter: 'OpenRouter',
+    aiProviderDeepSeek: 'DeepSeek',
+    aiProviderGLM: '智谱 GLM',
+    aiProviderKimi: 'Kimi (月之暗面)',
+    aiProviderGemini: 'Gemini',
+    aiProviderMimo: '小米 MiMo',
     aiProviderCustom: '自定义服务商',
     aiEndpoint: 'API 端点',
     aiEndpointPlaceholder: 'https://api.openai.com/v1/chat/completions',
     aiModel: '模型',
     aiModelPlaceholder: '留空使用默认模型',
+    aiDailyLimitLabel: '每日限额',
     aiLimitReached: '今日 AI 额度已用完，自动降级为本地规则',
     aiNoKey: '未配置 API 密钥，AI 功能未启用',
     aiKeyValid: 'API 密钥验证通过',
     aiKeyInvalid: 'API 密钥无效',
     aiTestBtn: '测试密钥',
+    aiTokenStats: 'Token 消耗: 累计 {total} / 本次会话 {session}',
 
     // ── 风险等级 ──────────────────────────────────────────────────────────
     riskSafe: '安全',
@@ -225,8 +275,6 @@ const strings = {
     sectionAI: 'AI 语义分析',
     sectionTopic: '话题偏好',
     sectionSystem: '系统状态',
-    sectionRules: '屏蔽规则',
-    sectionCustom: '自定义关键词',
 
     // ── 话题详情 (A12) ────────────────────────────────────────────────────
     topicDetailTitle: '话题详情',
@@ -244,6 +292,11 @@ const strings = {
     topicDetailDisabled: '已禁用',
     topicDetailSourceBuiltin: '内置话题',
     topicDetailSourceUser: '自定义话题',
+    topicDetailClear: '清除',
+    topicDetailClearExamples: '清除示例',
+    topicDetailClearConfirm: '确定清除该话题的所有匹配示例吗？',
+    topicDetailHitRate: '命中率',
+    topicDetailAiHitCount: '命中 {n} 次',
 
     // ── 可解释性 (A9) ────────────────────────────────────────────────────
     explainTitle: '为什么被拦截',
@@ -281,6 +334,13 @@ const strings = {
     low: 'Low',
     medium: 'Medium',
     high: 'High',
+    sensLow: 'Low sensitivity',
+    sensLowDesc: 'Only filter most toxic content',
+    sensMedium: 'Balanced',
+    sensMediumDesc: 'Balanced protection (recommended)',
+    sensHigh: 'Strict',
+    sensHighDesc: 'Currently being harassed',
+    sensHighWarning: 'Strict mode may block normal content, use temporarily',
     autoBlock: 'Auto-block',
     aiMode: 'AI Mode',
     aiDisabled: 'AI unavailable (API key required)',
@@ -331,19 +391,39 @@ const strings = {
     customAdd: 'Add',
     customDelete: 'Delete',
     customEmpty: 'No custom keywords',
-    customImport: 'Import',
-    customExport: 'Export',
+    customImport: 'Batch Import',
+    customExport: 'Batch Export',
     customDelConfirm: 'Delete "{keyword}"?',
     customClearAll: 'Clear All',
     customClearAllConfirm: 'Delete all {n} custom keywords? This cannot be undone.',
     customCleared: 'Custom keywords cleared',
     customDeleted: 'Deleted "{keyword}"',
+    customEdit: 'Edit',
+    customEditTitle: 'Edit Keyword',
+    customEditKeyword: 'Keyword',
+    customEditAliases: 'Aliases (comma separated)',
+    customEditSave: 'Save',
+    customEditCancel: 'Cancel',
+    customSearchPlaceholder: 'Search keywords...',
+    customSearchNoResult: 'No matching keywords',
+    rulesSearchPlaceholder: 'Search rules...',
+    rulesSearchNoResult: 'No matching rules',
+    sectionRulesCustom: 'Block Rules',
 
     // ── Rules View ────────────────────────────────────────────────────────────
     rulesTitle: 'Block Rules',
     rulesHard: 'Hard Keywords (direct block)',
     rulesSoft: 'Soft Keywords (sensitive detection)',
-    rulesRegex: 'Regex Patterns',
+    rulesRegex: 'Built-in Regex',
+    rulesCustomRegex: 'Custom Regex',
+    regexAddPlaceholder: 'Enter regex pattern...',
+    regexAddFlags: 'Flags',
+    regexAddDesc: 'Description (optional)',
+    regexAddBtn: 'Add',
+    regexDelConfirm: 'Delete regex rule "{pattern}"?',
+    regexInvalid: 'Invalid regex pattern',
+    regexExists: 'Regex rule already exists',
+    regexDescBuiltin: 'Built-in rule',
     rulesCustom: 'Custom Keywords',
     rulesVariant: 'Variant Mapping',
     rulesPinyin: 'Pinyin Mapping',
@@ -421,6 +501,15 @@ const strings = {
     aboutPrivacy: 'Privacy',
     aboutGithub: 'GitHub',
 
+    // ── Quick Start ─────────────────────────────────────────────────────
+    guideTitle: 'Quick Start',
+    guideSens: 'Sensitivity',
+    guideSensDesc: 'Low → L1 only. Minimal detection. Medium (recommended) → Auto account-level routing: official/gold accounts skip L2/L3 to reduce false positives, normal accounts get full pipeline. High → Full 3 layers + lower soft-keyword threshold, enable when being harassed.',
+    guideAI: 'AI Dual-Track Analysis',
+    guideAIDesc: 'When AI is enabled, each comment is analyzed on two tracks: topic and attack. Either track finding toxicity triggers blocking. AI also auto-learns frequent patterns and promotes them to local rules.',
+    guideLayers: '3-Layer Detection',
+    guideLayersDesc: 'L1 Keywords + Regex + Variant/Pinyin matching (~0ms) → L2 Behavioral signals (ALL CAPS, repetition, emoji) → L3 AI semantic analysis (API Key required, only triggered for suspicious content to save quota).',
+
     // ── Scan reasons (scanner.js) ─────────────────────────────────────────
     harassReason: 'Harassment: @{user} sent {count} replies',
     harassEvidence: 'Same user @{user} sent {count} replies',
@@ -456,16 +545,24 @@ const strings = {
     aiProvider: 'AI Provider',
     aiProviderClaude: 'Claude (Anthropic)',
     aiProviderOpenAI: 'OpenAI (GPT)',
+    aiProviderOpenRouter: 'OpenRouter',
+    aiProviderDeepSeek: 'DeepSeek',
+    aiProviderGLM: 'Zhipu GLM',
+    aiProviderKimi: 'Kimi (Moonshot)',
+    aiProviderGemini: 'Gemini',
+    aiProviderMimo: 'Xiaomi MiMo',
     aiProviderCustom: 'Custom Provider',
     aiEndpoint: 'API Endpoint',
     aiEndpointPlaceholder: 'https://api.openai.com/v1/chat/completions',
     aiModel: 'Model',
     aiModelPlaceholder: 'Leave empty for default',
+    aiDailyLimitLabel: 'Daily limit',
     aiLimitReached: 'Daily AI quota exhausted, using local rules only',
     aiNoKey: 'No API key configured, AI disabled',
     aiKeyValid: 'API key valid',
     aiKeyInvalid: 'API key invalid',
     aiTestBtn: 'Test Key',
+    aiTokenStats: 'Token usage: Total {total} / Session {session}',
 
     // ── Risk Levels ───────────────────────────────────────────────────────
     riskSafe: 'Safe',
@@ -497,8 +594,6 @@ const strings = {
     sectionAI: 'AI Semantic Analysis',
     sectionTopic: 'Topic Preferences',
     sectionSystem: 'System Status',
-    sectionRules: 'Block Rules',
-    sectionCustom: 'Custom Keywords',
 
     // ── Topic Detail (A12) ────────────────────────────────────────────────
     topicDetailTitle: 'Topic Detail',
@@ -516,6 +611,11 @@ const strings = {
     topicDetailDisabled: 'Disabled',
     topicDetailSourceBuiltin: 'Built-in topic',
     topicDetailSourceUser: 'Custom topic',
+    topicDetailClear: 'Clear',
+    topicDetailClearExamples: 'Clear examples',
+    topicDetailClearConfirm: 'Clear all matching examples for this topic?',
+    topicDetailHitRate: 'Hit rate',
+    topicDetailAiHitCount: 'Hit {n} times',
 
     // ── Explainability (A9) ──────────────────────────────────────────────
     explainTitle: 'Why was this filtered',
@@ -567,6 +667,7 @@ export function getLang() {
 export function setLang(newLang) {
   if (newLang === 'zh' || newLang === 'en') {
     lang = newLang;
+    try { GM_setValue('cs_lang', lang); } catch (e) { /* ignore */ }
   }
   return lang;
 }
@@ -576,5 +677,6 @@ export function setLang(newLang) {
  */
 export function toggleLang() {
   lang = lang === 'zh' ? 'en' : 'zh';
+  try { GM_setValue('cs_lang', lang); } catch (e) { /* ignore */ }
   return lang;
 }

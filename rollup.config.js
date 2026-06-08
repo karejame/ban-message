@@ -29,6 +29,14 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @connect      api.anthropic.com
 // @connect      api.bilibili.com
 // @connect      bilibili.com
+// @connect      api.openai.com
+// @connect      api.deepseek.com
+// @connect      open.bigmodel.cn
+// @connect      api.moonshot.cn
+// @connect      generativelanguage.googleapis.com
+// @connect      openrouter.ai
+// @connect      xiaomimimo.com
+// @connect      *
 //
 // @run-at       document-idle
 // ==/UserScript==

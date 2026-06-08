@@ -5,7 +5,7 @@ import { Blocker } from './src/core/blocker.js';
 import { Evidence } from './src/core/evidence.js';
 import { PlatformRegistry } from './src/platforms/index.js';
 import { Panel } from './src/core/panel.js';
-import { on } from './src/core/events.js';
+import { on, emit } from './src/core/events.js';
 
 (function () {
   'use strict';
@@ -23,11 +23,14 @@ import { on } from './src/core/events.js';
       apiKey: '',                  // user's API key (empty by default)
       aiEndpoint: '',              // custom API endpoint URL
       aiModel: '',                 // custom model override (empty = provider default)
+      aiDailyLimit: 200,           // 每日 AI 调用限额（完整模式默认 200）
       showBlurred: true,           // show blurred content with reveal option
       evidenceLog: true,           // save evidence automatically
       whitelist: [],               // usernames to always show
       blocklist: [],               // manually blocked users
       customKeywords: [],          // user-defined filter keywords [{keyword, aliases, addedAt}]
+      customRegex: [],             // user-defined regex patterns [{pattern, flags, description, addedAt}]
+      autoLearnedKeywords: [],     // AI 自动学习的关键词（持续累加）
     },
 
     async load() {
@@ -71,11 +74,21 @@ import { on } from './src/core/events.js';
 
         // ── 监听配置变更事件 ────────────────────────────────────────────────
         on('config:updated', (data) => {
+          if (data.type === 'customRegex') {
+            this.scanner.detector.reloadCustomRegex();
+            this.scanner.manualScan();
+          }
           if (data.type === 'customKeywords') {
             console.log('[CyberShield] Custom keywords changed, re-scanning page...');
             this.scanner.detector.reloadCustomKeywords();
             this.scanner._updateRuleCounts();
             // 新增：重扫页面以应用新关键词
+            this.scanner.manualScan();
+          }
+          if (data.type === 'autoLearnedKeywords') {
+            console.log('[CyberShield] Auto-learned keywords updated, re-scanning page...');
+            this.scanner.detector.reloadAutoLearnedKeywords();
+            this.scanner._updateRuleCounts();
             this.scanner.manualScan();
           }
         });

@@ -407,5 +407,16 @@
     "zoophilia",
     "🖕"
   ],
-  "regex_patterns": []
+  "regex_patterns": [
+    "(fuck\\s*(you|off|u))",
+    "(go\\s+kill\\s+yourself|kys)",
+    "(you\\s+are\\s+(a\\s+)?(loser|idiot|moron|retard|stupid|dumb|trash|garbage))",
+    "(kill\\s+yourself|die\\s+in\\s+a\\s+fire)",
+    "(stfu|shut\\s+the\\s+fuck\\s+up)",
+    "(suck\\s+(my|a|dick|cock))",
+    "(mother\\s*fucker|m[ou]th[ae]rf?ucker)",
+    "(piece\\s+of\\s+shit|pos)",
+    "(worthless\\s+(piece|human|trash))",
+    "(nobody\\s+(likes|loves|cares\\s+about)\\s+you)"
+  ]
 }

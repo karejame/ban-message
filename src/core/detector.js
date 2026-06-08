@@ -124,6 +124,8 @@ export class Detector {
     this.pinyinMap = zhPatterns.pinyin_map || {};
 
     this._addCustomKeywords();
+    this._addCustomRegex();
+    this._addAutoLearnedKeywords();
   }
 
   _addCustomKeywords() {
@@ -158,11 +160,69 @@ export class Detector {
     this._addCustomKeywords();
   }
 
+  _addCustomRegex() {
+    this._customRegexSources = new Set();
+    const customs = this.config.customRegex || [];
+    for (const entry of customs) {
+      if (entry.pattern) {
+        try {
+          const flags = entry.flags || 'i';
+          const rx = new RegExp(entry.pattern, flags);
+          this.regexPatterns.push(rx);
+          this._customRegexSources.add(entry.pattern);
+        } catch (e) {
+          console.warn(`[CyberShield] Invalid custom regex: ${entry.pattern}`, e);
+        }
+      }
+    }
+  }
+
+  reloadCustomRegex() {
+    if (this._customRegexSources) {
+      this.regexPatterns = this.regexPatterns.filter(p => !this._customRegexSources.has(p.source));
+    }
+    this._addCustomRegex();
+  }
+
+  /** 加载 AI 自动学习的关键词到硬关键词 */
+  _addAutoLearnedKeywords() {
+    this._autoLearnedKeywordKeys = new Set();
+    const learned = this.config.autoLearnedKeywords || [];
+    for (const kw of learned) {
+      const lower = kw.toLowerCase().trim();
+      if (lower.length >= 2 && !this.hardKeywords.has(lower)) {
+        this._autoLearnedKeywordKeys.add(lower);
+        this.hardKeywords.add(lower);
+      }
+    }
+  }
+
+  /** 重载 AI 自动学习的关键词（配置变更后调用） */
+  reloadAutoLearnedKeywords() {
+    if (this._autoLearnedKeywordKeys) {
+      for (const kw of this._autoLearnedKeywordKeys) {
+        this.hardKeywords.delete(kw);
+      }
+    }
+    this._addAutoLearnedKeywords();
+  }
+
   getAllRules() {
+    // 区分内置正则和自定义正则
+    const builtinRegex = [];
+    const customRegex = this.config.customRegex || [];
+    const customSources = new Set(customRegex.map(e => e.pattern));
+    for (const rx of this.regexPatterns) {
+      if (!customSources.has(rx.source)) {
+        builtinRegex.push(rx.source);
+      }
+    }
+
     return {
       hardKeywords: [...this.hardKeywords],
       softKeywords: [...this.softKeywords],
-      regexPatterns: this.regexPatterns.map(p => p.source),
+      regexPatterns: builtinRegex,
+      customRegex: customRegex,
       customKeywords: this.config.customKeywords || [],
       variantMap: this.variantMap,
       pinyinMap: this.pinyinMap,
@@ -184,25 +244,40 @@ export class Detector {
   analyze(text, context = {}, aiAnalyzer = null, onAIResult = null, extras = {}) {
     const explainChain = [];
 
+    // ★ 灵敏度路由
+    const sensitivity = this.config.sensitivity || 'medium';
+    const accountLevel = extras.accountLevel || 'normal';
+    const skipL2 = (sensitivity === 'low') ||
+      (sensitivity === 'medium' && accountLevel === 'official');
+    const skipAI = skipL2 ||
+      (sensitivity === 'medium' && accountLevel === 'official');
+
     // ── Step 1: 归一化（使用 text-normalizer）──────────────────────────────
     const normalized = normalizeText(text, { preserveNumbers: true });
     const deepNormalized = normalizeDeep(text, { preserveNumbers: true });
 
     // ── Step 2: Layer 1 — 关键词 + 变体匹配 ──────────────────────────────
-    const l1 = this._layerOneKeywords(normalized, deepNormalized);
+    const l1 = this._layerOneKeywords(normalized, deepNormalized, sensitivity === 'high');
     if (l1.verdict === Verdict.TOXIC) {
       explainChain.push({ layer: 1, verdict: l1.verdict, matched: l1.matched, reason: l1.reason });
-      l1.riskLevel = verdictToRiskLevel(l1.verdict, l1.confidence, this.config.sensitivity);
+      l1.riskLevel = verdictToRiskLevel(l1.verdict, l1.confidence, sensitivity);
       l1.explainChain = explainChain;
       l1.intent = null;
       return l1;
+    }
+
+    // ★ LOW / MEDIUM+official: L1 未命中则直接返回 SAFE，不走 L2 / AI
+    if (skipL2) {
+      const result = { ...l1, riskLevel: verdictToRiskLevel(l1.verdict, l1.confidence, sensitivity) };
+      result.explainChain = explainChain;
+      return result;
     }
 
     // ── Step 3: Layer 2 — 行为信号 ──────────────────────────────────────
     const l2 = this._layerTwoBehavior(normalized, context);
     if (l2.verdict === Verdict.TOXIC) {
       explainChain.push({ layer: 2, verdict: l2.verdict, matched: l2.matched, reason: l2.reason });
-      l2.riskLevel = verdictToRiskLevel(l2.verdict, l2.confidence, this.config.sensitivity);
+      l2.riskLevel = verdictToRiskLevel(l2.verdict, l2.confidence, sensitivity);
       l2.explainChain = explainChain;
       l2.intent = null;
       return l2;
@@ -227,7 +302,7 @@ export class Detector {
               messageCount: combined.messages.length,
             });
             combinedL1.layer = 2;
-            combinedL1.riskLevel = verdictToRiskLevel(combinedL1.verdict, combinedL1.confidence, this.config.sensitivity);
+            combinedL1.riskLevel = verdictToRiskLevel(combinedL1.verdict, combinedL1.confidence, sensitivity);
             combinedL1.explainChain = explainChain;
             combinedL1.intent = null;
             return combinedL1;
@@ -237,7 +312,7 @@ export class Detector {
     }
 
     // ── Step 5: Layer 3 — AI 语义分析（异步） ─────────────────────────
-    if (aiAnalyzer && onAIResult && this.config.aiEnabled) {
+    if (!skipAI && aiAnalyzer && onAIResult && this.config.aiEnabled) {
       const currentResult = l2.verdict === Verdict.SUSPICIOUS ? l2 : l1;
       const involvesTopic = extras.topicFilter
         ? extras.topicFilter.involvesUserTopic(normalized)
@@ -255,7 +330,7 @@ export class Detector {
         aiAnalyzer.analyze(text, aiContext).then(aiResult => {
           if (aiResult) {
             aiResult.riskLevel = verdictToRiskLevel(
-              aiResult.verdict, aiResult.confidence, this.config.sensitivity
+              aiResult.verdict, aiResult.confidence, sensitivity
             );
             aiResult.explainChain = [
               ...explainChain,
@@ -271,7 +346,7 @@ export class Detector {
     const finalResult = l2.verdict === Verdict.SUSPICIOUS ? l2 : {
       verdict: Verdict.SAFE, confidence: 0.1, layer: 2, reason: 'No signals', matched: [],
     };
-    finalResult.riskLevel = verdictToRiskLevel(finalResult.verdict, finalResult.confidence, this.config.sensitivity);
+    finalResult.riskLevel = verdictToRiskLevel(finalResult.verdict, finalResult.confidence, sensitivity);
     finalResult.explainChain = explainChain;
     finalResult.intent = null;
     return finalResult;
@@ -279,7 +354,7 @@ export class Detector {
 
   // ── Layer 1: Keyword Matching + Variant/Fuzzy Matching ─────────────────────
 
-  _layerOneKeywords(text, deepText) {
+  _layerOneKeywords(text, deepText, lowThreshold) {
     const matched = [];
 
     // Hard keywords: instant toxic verdict
@@ -340,7 +415,8 @@ export class Detector {
         softScore += 1;
       }
     }
-    if (softScore >= 2) {
+    const softThreshold = lowThreshold ? 1 : 2;
+    if (softScore >= softThreshold) {
       return { verdict: Verdict.SUSPICIOUS, confidence: 0.6 + softScore * 0.05, layer: 1, reason: 'Multiple soft keywords', matched: softMatched };
     }
 

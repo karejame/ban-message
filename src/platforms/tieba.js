@@ -22,4 +22,12 @@ export const TiebaPlatform = {
       text:  t('tiebaManual', { user: username }),
     });
   },
+
+  /** 判定账号级别 */
+  getAccountLevel(commentEl) {
+    // 贴吧：.UserBadge = 认证用户（无官方/个人细分）
+    if (!commentEl) return 'normal';
+    if (commentEl.querySelector('.UserBadge, [class*="badge"], [class*="vip"]')) return 'verified';
+    return 'normal';
+  },
 };

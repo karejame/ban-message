@@ -17,6 +17,13 @@
  */
 
 const TOPIC_FILTER_KEY = 'cs_topic_filter';
+const TOPIC_EXAMPLES_KEY = 'cs_topic_examples';
+const TOPIC_AIRULES_KEY = 'cs_topic_airules';
+
+/** 判断文本是否包含中文字符 */
+function _isChinese(text) {
+  return /[一-鿿　-〿＀-￯]/.test(text);
+}
 
 /** 内置话题定义 */
 export const BUILTIN_TOPICS = {
@@ -100,6 +107,7 @@ export class TopicFilter {
     this.topics = {};
     this.userTopics = [];
     this.removedTopics = [];  // 用户已删除的话题 ID（含内置）
+    this.topicExamples = {};   // 话题匹配的示例记录 { topicId: [{ text, username, timestamp }] }
     this._load();
   }
 
@@ -130,6 +138,13 @@ export class TopicFilter {
           source: 'user',
         };
       }
+
+      // 加载 AI 学习的话题关键词 + 规则
+      this._loadAIKeywords();
+      this._loadAIRules();
+
+      // 加载话题匹配示例
+      this._loadTopicExamples();
     } catch (e) {
       // 初始化默认值
       for (const [id, topic] of Object.entries(BUILTIN_TOPICS)) {
@@ -160,11 +175,21 @@ export class TopicFilter {
    * @returns {string[]} 命中的话题 id 列表
    */
   detectTopics(text) {
+    return this._detectTopics(text, true);
+  }
+
+  /** 检测文本涉及哪些话题（忽略启用/禁用状态，用于取证记录） */
+  detectAllTopics(text) {
+    return this._detectTopics(text, false);
+  }
+
+  /** 内部：话题检测核心逻辑 */
+  _detectTopics(text, onlyEnabled) {
     const lower = text.toLowerCase();
     const hits = [];
 
     for (const [id, topic] of Object.entries(this.topics)) {
-      if (!topic.enabled) continue;
+      if (onlyEnabled && !topic.enabled) continue;
 
       const keywords = [
         ...(topic.keywords?.zh || []),
@@ -246,5 +271,233 @@ export class TopicFilter {
       source: t.source || 'builtin',
       keywordCount: (t.keywords?.zh || []).length + (t.keywords?.en || []).length,
     }));
+  }
+
+  /**
+   * 从 AI 分析结果中学习，更新话题关键词和规则
+   * @param {string} intent  AI 识别的话题类别
+   * @param {string[]} patterns  AI 提取的触发模式
+   * @param {string} [text]  原始文本（用于示例）
+   * @param {string} [username]  用户名（用于示例）
+   * @param {number} [confidence]  AI 置信度
+   */
+  learnFromAI(intent, patterns, text, username, confidence) {
+    if (!intent || !patterns || patterns.length === 0) return false;
+
+    const matchedId = this._matchIntentToTopic(intent);
+    if (!matchedId || !this.topics[matchedId]) return false;
+
+    const topic = this.topics[matchedId];
+    if (!topic.aiKeywords) topic.aiKeywords = [];
+    if (!topic.aiRules) topic.aiRules = [];
+
+    let added = false;
+    for (const p of patterns) {
+      const lower = p.toLowerCase().trim();
+      if (lower.length < 2) continue;
+
+      // 确保 aiKeywords 不重复
+      if (!topic.aiKeywords.includes(lower)) {
+        const allExisting = [...(topic.keywords?.zh || []), ...(topic.keywords?.en || [])];
+        if (!allExisting.includes(lower)) {
+          topic.aiKeywords.push(lower);
+          added = true;
+        }
+      }
+
+      // 更新 AI 规则（含命中统计）
+      const existingRule = topic.aiRules.find(r => r.trigger === lower);
+      if (existingRule) {
+        existingRule.hits = (existingRule.hits || 0) + 1;
+        existingRule.lastHitAt = Date.now();
+        existingRule.confidence = confidence || existingRule.confidence;
+      } else {
+        topic.aiRules.push({
+          trigger: lower,
+          confidence: confidence || 0.85,
+          hits: 1,
+          source: 'ai_learned',
+          createdAt: Date.now(),
+          lastHitAt: Date.now(),
+        });
+      }
+    }
+
+    if (added) {
+      if (!topic.keywords) topic.keywords = { zh: [], en: [] };
+      for (const kw of topic.aiKeywords) {
+        if (!topic.keywords.zh.includes(kw)) {
+          topic.keywords.zh.push(kw);
+        }
+      }
+      this._saveAIKeywords(matchedId, topic.aiKeywords);
+    }
+
+    // 持久化保存 AI 规则
+    this._saveAIRules(matchedId, topic.aiRules);
+
+    // 保存匹配示例
+    if (text) {
+      this.addTopicExample(matchedId, text, username);
+    }
+
+    return true;
+  }
+
+  /** 将 intent 字符串匹配到话题 ID */
+  _matchIntentToTopic(intent) {
+    const i = intent.toLowerCase().trim();
+    // 精确匹配 id
+    if (this.topics[i]) return i;
+    // 模糊匹配：按标签名
+    for (const [id, topic] of Object.entries(this.topics)) {
+      const labels = [topic.label?.zh, topic.label?.en, id].filter(Boolean);
+      for (const label of labels) {
+        if (label.toLowerCase().includes(i) || i.includes(label.toLowerCase())) return id;
+      }
+    }
+    return null;
+  }
+
+  /** 持久化 AI 学习的关键词 */
+  _saveAIKeywords(topicId, aiKeywords) {
+    try {
+      const saved = JSON.parse(GM_getValue(TOPIC_FILTER_KEY, '{}'));
+      if (!saved.aiKeywords) saved.aiKeywords = {};
+      saved.aiKeywords[topicId] = aiKeywords;
+      GM_setValue(TOPIC_FILTER_KEY, JSON.stringify(saved));
+    } catch (e) { /* silent */ }
+  }
+
+  /** 加载 AI 学习的关键词 */
+  _loadAIKeywords() {
+    try {
+      const saved = JSON.parse(GM_getValue(TOPIC_FILTER_KEY, '{}'));
+      const aiKeywords = saved.aiKeywords || {};
+      for (const [id, keywords] of Object.entries(aiKeywords)) {
+        if (this.topics[id]) {
+          this.topics[id].aiKeywords = keywords;
+          if (!this.topics[id].keywords) this.topics[id].keywords = { zh: [], en: [] };
+          for (const kw of keywords) {
+            if (!this.topics[id].keywords.zh.includes(kw)) {
+              this.topics[id].keywords.zh.push(kw);
+            }
+          }
+        }
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  // ── AI 学习规则管理 ───────────────────────────────────────────────────
+
+  /** 持久化 AI 学习规则 */
+  _saveAIRules(topicId, rules) {
+    try {
+      const saved = JSON.parse(GM_getValue(TOPIC_AIRULES_KEY, '{}'));
+      saved[topicId] = rules;
+      GM_setValue(TOPIC_AIRULES_KEY, JSON.stringify(saved));
+    } catch (e) { /* silent */ }
+  }
+
+  /** 加载 AI 学习规则 */
+  _loadAIRules() {
+    try {
+      const saved = JSON.parse(GM_getValue(TOPIC_AIRULES_KEY, '{}'));
+      for (const [id, rules] of Object.entries(saved)) {
+        if (this.topics[id]) {
+          this.topics[id].aiRules = rules;
+        }
+      }
+    } catch (e) { /* silent */ }
+  }
+
+  /**
+   * 获取话题的 AI 学习规则（含命中统计）
+   * @param {string} topicId
+   * @returns {Array}
+   */
+  getAIRules(topicId) {
+    return this.topics[topicId]?.aiRules || [];
+  }
+
+  /**
+   * 记录一次 AI 规则命中（累计命中次数）
+   * @param {string} topicId
+   * @param {string} trigger
+   */
+  recordAIRuleHit(topicId, trigger) {
+    const rules = this.topics[topicId]?.aiRules;
+    if (!rules) return;
+    const t = trigger.toLowerCase().trim();
+    for (const r of rules) {
+      if (r.trigger === t) {
+        r.hits = (r.hits || 0) + 1;
+        r.lastHitAt = Date.now();
+        this._saveAIRules(topicId, rules);
+        return;
+      }
+    }
+  }
+
+  // ── 话题匹配示例管理 ──────────────────────────────────────────────────
+
+  /** 加载话题匹配示例 */
+  _loadTopicExamples() {
+    try {
+      const saved = GM_getValue(TOPIC_EXAMPLES_KEY, '{}');
+      this.topicExamples = JSON.parse(saved);
+    } catch (e) {
+      this.topicExamples = {};
+    }
+  }
+
+  /** 持久化话题匹配示例 */
+  _saveTopicExamples() {
+    try {
+      GM_setValue(TOPIC_EXAMPLES_KEY, JSON.stringify(this.topicExamples));
+    } catch (e) { /* silent */ }
+  }
+
+  /**
+   * 添加话题匹配示例（最多保留最新的 N 条）
+   * @param {string} topicId
+   * @param {string} text
+   * @param {string} username
+   * @param {number} [max=5]
+   */
+  addTopicExample(topicId, text, username, max = 5) {
+    if (!topicId || !text) return;
+    if (!this.topicExamples[topicId]) this.topicExamples[topicId] = [];
+    this.topicExamples[topicId].unshift({
+      text: text.slice(0, 200),
+      username: username || '?',
+      timestamp: Date.now(),
+    });
+    if (this.topicExamples[topicId].length > max) {
+      this.topicExamples[topicId].length = max;
+    }
+    this._saveTopicExamples();
+  }
+
+  /**
+   * 清除话题匹配示例
+   * @param {string} [topicId] 不传则清除所有话题示例
+   */
+  clearTopicExamples(topicId) {
+    if (topicId) {
+      delete this.topicExamples[topicId];
+    } else {
+      this.topicExamples = {};
+    }
+    this._saveTopicExamples();
+  }
+
+  /**
+   * 获取话题匹配示例
+   * @param {string} topicId
+   * @returns {Array}
+   */
+  getTopicExamples(topicId) {
+    return this.topicExamples[topicId] || [];
   }
 }

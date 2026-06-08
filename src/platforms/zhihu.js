@@ -29,4 +29,19 @@ export const ZhihuPlatform = {
       });
     }, 600);
   },
+
+  getCurrentUser() {
+    try {
+      const el = document.querySelector('.AppHeader-userInfo, .ProfileHeader-name');
+      return el?.textContent?.trim() || null;
+    } catch (e) { return null; }
+  },
+
+  /** 判定账号级别 */
+  getAccountLevel(commentEl) {
+    // 知乎：.UserBadge = 认证用户（知乎无细分官方/个人，统一视为 verified）
+    if (!commentEl) return 'normal';
+    if (commentEl.querySelector('.UserBadge, [class*="Badge"], [class*="badge"]')) return 'verified';
+    return 'normal';
+  },
 };

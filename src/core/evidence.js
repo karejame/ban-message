@@ -60,10 +60,16 @@ export class Evidence {
 
   /**
    * Export evidence log as a downloadable JSON file.
+   * 导出时自动脱敏：移除 username 中的个人标识符，截断文本长度。
    */
   exportJSON() {
     const log  = this._load();
-    const blob = new Blob([JSON.stringify(log, null, 2)], { type: 'application/json' });
+    const safe = log.map(e => ({
+      ...e,
+      username: e.username ? e.username.replace(/[0-9]/g, '*') : e.username,
+      text: e.text?.slice(0, 100),
+    }));
+    const blob = new Blob([JSON.stringify(safe, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;

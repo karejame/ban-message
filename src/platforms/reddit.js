@@ -86,4 +86,7 @@ export const RedditPlatform = {
       onclick: () => window.open(profileUrl, '_blank'),
     });
   },
+
+  /** 判定账号级别 */
+  getAccountLevel() { return 'normal'; },
 };

@@ -109,6 +109,21 @@ export const BilibiliPlatform = {
     return null;
   },
 
+  /** 判定账号级别 */
+  getAccountLevel(commentEl) {
+    // B站：.v-official = 官方认证, .v-person = 个人认证
+    if (!commentEl) return 'normal';
+    if (commentEl.querySelector('.v-official')) return 'official';
+    if (commentEl.querySelector('.v-person')) return 'verified';
+    // 降级：检查 B站 的认证徽章样式
+    const badge = commentEl.querySelector('[class*="verify"], [class*="badge"]');
+    if (badge) {
+      if (badge.classList.contains('official')) return 'official';
+      if (badge.classList.contains('personal') || badge.classList.contains('blue')) return 'verified';
+    }
+    return 'normal';
+  },
+
   /**
    * 判断当前页面是否为B站消息中心页面。
    * 返回具体的子板块类型：'reply', 'whisper', 'at', 或 'message'（通用）。

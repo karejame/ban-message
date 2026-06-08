@@ -30,4 +30,15 @@ export const GenericPlatform = {
   },
 
   blockStrategy: null, // No generic block action — platform-specific only
+
+  getCurrentUser() {
+    // Generic: try to find a logged-in user element
+    try {
+      const el = document.querySelector('[data-user], [data-author], .user, .username, .author');
+      return el?.textContent?.trim() || null;
+    } catch (e) { return null; }
+  },
+
+  /** 通用平台：无认证标记，全部视为 normal */
+  getAccountLevel() { return 'normal'; },
 };
