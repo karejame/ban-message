@@ -10,7 +10,7 @@ const USERSCRIPT_HEADER = `// ==UserScript==
 // @description:zh-CN 保护你免受网络暴力。自动检测、屏蔽并记录骚扰内容。
 // @author       CyberShield Contributors
 // @license      MIT
-//
+//  
 // @match        *://twitter.com/*
 // @match        *://x.com/*
 // @match        *://www.reddit.com/*
